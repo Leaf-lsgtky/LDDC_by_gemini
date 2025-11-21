@@ -1,0 +1,7 @@
+{
+  "name": "LDDC Mobile",
+  "description": "A precision lyrics downloader and metadata editor for Android, based on the LDDC Python core.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}

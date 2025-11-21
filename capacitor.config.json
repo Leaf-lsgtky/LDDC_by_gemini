@@ -1,0 +1,13 @@
+{
+  "appId": "org.cmzj.lddcmobile",
+  "appName": "LDDC Mobile",
+  "webDir": "dist",
+  "server": {
+    "androidScheme": "https"
+  },
+  "plugins": {
+    "CapacitorHttp": {
+      "enabled": true
+    }
+  }
+}
