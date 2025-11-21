@@ -5,8 +5,8 @@
  */
 
 declare global {
-    const CryptoJS: any;
-    const pako: any;
+    var CryptoJS: any;
+    var pako: any;
 }
 
 // ==========================================

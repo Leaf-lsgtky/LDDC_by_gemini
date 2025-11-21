@@ -1,6 +1,8 @@
 import React from 'react';
 import { Icons } from './Icon';
-import { Link, useLocation } from 'react-router-dom';
+import * as ReactRouterDOM from 'react-router-dom';
+
+const { Link, useLocation } = ReactRouterDOM;
 
 interface LayoutProps {
   children: React.ReactNode;

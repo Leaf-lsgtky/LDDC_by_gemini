@@ -1,11 +1,13 @@
 
 import React, { useState, useRef, useEffect } from 'react';
-import { useNavigate } from 'react-router-dom';
+import * as ReactRouterDOM from 'react-router-dom';
 import { Layout } from '../components/Layout';
 import { SongCard } from '../components/SongCard';
 import { processFileImport, autoFetchLyrics, saveLyricsToTag, MOCK_SONGS, deleteSongs } from '../services/lddcService';
 import { SongInfo, ProcessStatus } from '../types';
 import { Icons } from '../components/Icon';
+
+const { useNavigate } = ReactRouterDOM;
 
 export const Home: React.FC = () => {
     // Initialize from GLOBAL MOCK_SONGS to ensure persistence when navigating back

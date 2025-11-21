@@ -1,10 +1,12 @@
 
 import React, { useEffect, useState } from 'react';
-import { useParams } from 'react-router-dom';
+import * as ReactRouterDOM from 'react-router-dom';
 import { Layout } from '../components/Layout';
 import { getLyricsContent, getSongById, searchOnlineLyrics, applyLyricsToSong } from '../services/lddcService'; 
 import { LyricInfo, SongInfo, Source, SearchResult, LyricsType } from '../types';
 import { Icons } from '../components/Icon';
+
+const { useParams } = ReactRouterDOM;
 
 const SourceMap: Record<Source, string> = {
     [Source.MULTI]: '聚合',
@@ -28,6 +30,7 @@ export const LyricsDetail: React.FC = () => {
             setSong(s ? {...s} : undefined); 
             if (s) {
                 setLoading(true);
+                // Use passed ID or temp ID from auto-match or fallback to song.id
                 const l = await getLyricsContent(id, specificLyricId);
                 setLyrics(l);
                 setLoading(false);
@@ -85,7 +88,7 @@ export const LyricsDetail: React.FC = () => {
                     ) : (
                         <div className="h-full flex flex-col items-center justify-center text-gray-500 gap-2">
                             <span className="text-lg">未找到歌词</span>
-                            <span className="text-xs opacity-50">尝试手动搜索或更换源</span>
+                            <span className="text-xs opacity-50">请检查网络连接 (需支持CORS或使用APK)</span>
                         </div>
                     )}
                 </div>
@@ -116,7 +119,7 @@ export const LyricsDetail: React.FC = () => {
                         setShowSearch(false);
                         if (id) {
                             await applyLyricsToSong(id, result);
-                            // Pass the lyricId if it exists (e.g. from Lrclib) to fetch correct content immediately
+                            // Pass the lyricId if it exists to fetch correct content immediately
                             loadData(result.lyricId);
                         }
                     }}
@@ -182,11 +185,11 @@ const SearchModal: React.FC<SearchModalProps> = ({ defaultKeyword, onClose, onSe
                                 onClick={() => onSelect(res)}
                                 className="bg-gray-800 p-3 rounded-lg flex items-center justify-between active:bg-gray-700"
                             >
-                                <div>
-                                    <div className="text-sm font-bold text-white">{res.title}</div>
-                                    <div className="text-xs text-gray-400">{res.artist} - {res.album}</div>
+                                <div className="min-w-0 flex-1 mr-2">
+                                    <div className="text-sm font-bold text-white truncate">{res.title}</div>
+                                    <div className="text-xs text-gray-400 truncate">{res.artist} - {res.album}</div>
                                 </div>
-                                <div className="flex flex-col items-end gap-1">
+                                <div className="flex flex-col items-end gap-1 flex-shrink-0">
                                     <span className="text-[10px] bg-gray-700 text-gray-300 px-1.5 rounded">
                                         {SourceMap[res.source]}
                                     </span>

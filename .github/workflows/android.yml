@@ -34,7 +34,7 @@ jobs:
       - name: Add Android Platform
         # Explicitly install CLI to avoid "could not determine executable" error
         run: |
-          npm install @capacitor/core @capacitor/cli @capacitor/android
+          npm install @capacitor/core @capacitor/cli @capacitor/android @capacitor/app
           npx cap add android
           npx cap sync
 
