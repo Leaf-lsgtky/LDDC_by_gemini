@@ -1,4 +1,3 @@
-
 /**
  * LDDC Core Decryption Logic (Ported to TypeScript)
  * Requires: crypto-js, pako
@@ -87,15 +86,16 @@ export function krcDecrypt(data: Uint8Array): string {
 const QRC_KEY_STR = "!@#)(*$%123ZXC!@!@#)(NHL";
 
 export function qrcDecrypt(data: Uint8Array): string {
+    // Fix: Ensure data is not empty/undefined before processing
     if (!data || data.length === 0) {
-        throw new Error("QRC Input data is empty");
+        throw new Error("QRC Input data is empty or undefined");
     }
 
     try {
         if (typeof CryptoJS === 'undefined') throw new Error("CryptoJS not loaded");
         if (typeof pako === 'undefined') throw new Error("pako library not loaded");
 
-        console.log(`[QRC Decrypt] Input size: ${data.length} bytes`);
+        // console.log(`[QRC Decrypt] Input size: ${data.length} bytes`);
 
         const wordArray = CryptoJS.lib.WordArray.create(data);
         const keyHex = CryptoJS.enc.Utf8.parse(QRC_KEY_STR);
@@ -116,29 +116,29 @@ export function qrcDecrypt(data: Uint8Array): string {
              throw new Error("DES Decryption resulted in empty data");
         }
 
-        console.log(`[QRC Decrypt] DES output size: ${decryptedBytes.length} bytes`);
+        // console.log(`[QRC Decrypt] DES output size: ${decryptedBytes.length} bytes`);
 
         // 5. Decompress
         // We wrap pako in a try-catch to provide specific logging
         try {
             const decompressed = pako.inflate(decryptedBytes);
-            console.log(`[QRC Decrypt] Inflated size: ${decompressed.length} bytes`);
+            // console.log(`[QRC Decrypt] Inflated size: ${decompressed.length} bytes`);
             return new TextDecoder('utf-8').decode(decompressed);
         } catch (inflateErr) {
-            console.warn("[QRC Decrypt] Inflate failed on DES output, data might not be compressed or key wrong.");
+            // console.warn("[QRC Decrypt] Inflate failed on DES output, data might not be compressed or key wrong.");
             throw inflateErr;
         }
 
     } catch (e) {
-        console.warn("QRC Decrypt Error:", e);
+        // console.warn("QRC Decrypt Error:", e);
         
         // Fallback: Try direct decompression (sometimes data is just zlib compressed without DES)
         try {
-            console.log("[QRC Decrypt] Trying Direct Inflate Fallback...");
+            // console.log("[QRC Decrypt] Trying Direct Inflate Fallback...");
             const decompressed = pako.inflate(data);
             return new TextDecoder('utf-8').decode(decompressed);
         } catch (zlibError) {
-            console.error("QRC Decrypt Fallback Failed", zlibError);
+            // console.error("QRC Decrypt Fallback Failed", zlibError);
             throw e;
         }
     }
