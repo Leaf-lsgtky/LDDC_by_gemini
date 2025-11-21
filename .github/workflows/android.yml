@@ -32,9 +32,9 @@ jobs:
         uses: android-actions/setup-android@v3
 
       - name: Add Android Platform
-        # Explicitly install CLI to avoid "could not determine executable" error
+        # Fix: Pin versions to @6 to avoid conflict between @capacitor/android@7 and @capacitor/app@6
         run: |
-          npm install @capacitor/core @capacitor/cli @capacitor/android @capacitor/app
+          npm install @capacitor/core@6 @capacitor/cli@6 @capacitor/android@6 @capacitor/app@6
           npx cap add android
           npx cap sync
 
