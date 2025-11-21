@@ -1,4 +1,3 @@
-
 /**
  * LDDC Core Decryption Logic (Ported to TypeScript)
  * Requires: crypto-js, pako
@@ -89,6 +88,9 @@ export function qrcDecrypt(data: Uint8Array): string {
         const wordArray = CryptoJS.lib.WordArray.create(data);
         const keyHex = CryptoJS.enc.Utf8.parse(QRC_KEY_STR);
 
+        // Log data size for debug
+        console.log(`[QRC Decrypt] Input size: ${data.length} bytes`);
+
         // Use NoPadding. Padding errors are the most common cause of crash in ported code.
         // pako.inflate will ignore trailing garbage bytes from the block cipher.
         const decrypted = CryptoJS.TripleDES.decrypt(
@@ -101,19 +103,24 @@ export function qrcDecrypt(data: Uint8Array): string {
         );
 
         const decryptedBytes = convertWordArrayToUint8Array(decrypted);
+        console.log(`[QRC Decrypt] DES output size: ${decryptedBytes.length} bytes`);
 
         // 5. Decompress
         const decompressed = pako.inflate(decryptedBytes);
+        console.log(`[QRC Decrypt] Inflated size: ${decompressed.length} bytes`);
 
         // 6. Decode
         return new TextDecoder('utf-8').decode(decompressed);
     } catch (e) {
+        console.warn("QRC Decrypt Error:", e);
+        
         // Fallback: Try direct decompression (sometimes data is just zlib compressed without DES)
         try {
+            console.log("[QRC Decrypt] Trying Direct Inflate Fallback...");
             const decompressed = pako.inflate(data);
             return new TextDecoder('utf-8').decode(decompressed);
         } catch (zlibError) {
-            console.error("QRC Decrypt Failed", e);
+            console.error("QRC Decrypt Fallback Failed", zlibError);
             throw e;
         }
     }
