@@ -61,7 +61,7 @@ const signKG = (params: Record<string, any>) => {
 
 const searchKG = async (keyword: string): Promise<SearchResult[]> => {
     if (!CONFIG.sources[Source.KG]) return [];
-    if (typeof CryptoJS === 'undefined') return []; // Safety check
+    if (typeof CryptoJS === 'undefined') return [];
 
     try {
         const params = {
@@ -95,7 +95,7 @@ const searchKG = async (keyword: string): Promise<SearchResult[]> => {
         if (data.status === 1 && data.data && data.data.lists) {
             return data.data.lists.map((item: any) => ({
                 id: `kg-${item.ID}`, 
-                lyricId: item.FileHash, // KG uses Hash for lyrics
+                lyricId: item.FileHash, 
                 title: item.SongName,
                 artist: item.SingerName,
                 album: item.AlbumName,
