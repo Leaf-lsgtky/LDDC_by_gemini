@@ -83,7 +83,7 @@ const searchKG = async (keyword: string): Promise<SearchResult[]> => {
         const signature = signKG(params);
         const query = new URLSearchParams({ ...params, signature } as any).toString();
         
-        // Use HTTPS to avoid Cleartext Traffic errors on Android
+        // Use HTTPS
         const response = await fetch(`https://complexsearch.kugou.com/v2/search/song?${query}`, {
             method: 'GET',
             headers: {
@@ -148,7 +148,6 @@ const getLyricsKG = async (hash: string, songInfo: any): Promise<LyricInfo | nul
                 ver: 1
             };
             const downloadSig = signKG(downloadParams);
-            // Use HTTPS
             const downloadUrl = `https://lyrics.kugou.com/download?${new URLSearchParams({ ...downloadParams, signature: downloadSig } as any)}`;
             
             const dlResp = await fetch(downloadUrl);
@@ -261,7 +260,7 @@ const getLyricsQM = async (songId: string, songInfo: any): Promise<LyricInfo | n
                 module: "music.musichallSong.PlayLyricInfo",
                 param: {
                     songID: parseInt(songId),
-                    songName: btoa(unescape(encodeURIComponent(songInfo.title))), // Base64 Encode
+                    songName: btoa(unescape(encodeURIComponent(songInfo.title))),
                     albumName: btoa(unescape(encodeURIComponent(songInfo.album || ""))),
                     singerName: btoa(unescape(encodeURIComponent(songInfo.artist))),
                     qrc: 1,
@@ -282,16 +281,15 @@ const getLyricsQM = async (songId: string, songInfo: any): Promise<LyricInfo | n
         const lyricData = data.request?.data;
         
         if (lyricData) {
-            // Priority: QRC > Lyric
             const rawQrc = lyricData.qrc;
             const rawLrc = lyricData.lyric;
             let content = "";
             let type = LyricsType.LINEBYLINE;
             let success = false;
             
+            // 1. Try QRC Field
             if (rawQrc) {
                 try {
-                    // Fix: Force convert to string to avoid TypeError
                     const hex = String(rawQrc);
                     if (hex) {
                         const match = hex.match(/.{1,2}/g);
@@ -303,17 +301,40 @@ const getLyricsQM = async (songId: string, songInfo: any): Promise<LyricInfo | n
                         }
                     }
                 } catch (e) {
-                    console.warn("QRC Decrypt Failed, falling back to LRC", e);
+                    console.warn("QRC Field Decrypt Failed", e);
                 }
             } 
             
+            // 2. Try Lyric Field (fallback if QRC empty or failed)
             if (!success && rawLrc) {
                 try {
-                    content = decodeBase64Utf8(rawLrc);
-                    type = LyricsType.LINEBYLINE;
-                    success = true;
+                    const binaryString = atob(rawLrc);
+                    const bytes = new Uint8Array(binaryString.length);
+                    for (let i = 0; i < binaryString.length; i++) {
+                        bytes[i] = binaryString.charCodeAt(i);
+                    }
+
+                    // IMPORTANT: 'lyric' field can ALSO be encrypted (qrc data disguised) or plain text.
+                    // First, try to decrypt it as QRC.
+                    try {
+                        content = qrcDecrypt(bytes);
+                        type = LyricsType.VERBATIM;
+                        success = true;
+                    } catch (decryptErr) {
+                        // If decryption fails, assume it is plain text or simple zlib compressed
+                        // Note: qrcDecrypt already tries zlib decompression fallback.
+                        // So if we reach here, it's likely plain text encoded in utf-8.
+                        try {
+                            content = new TextDecoder('utf-8').decode(bytes);
+                            type = LyricsType.LINEBYLINE;
+                            success = true;
+                        } catch(textErr) {
+                            // Last resort: GBK? Browsers don't support TextDecoder('gbk') universally without polyfill.
+                            console.warn("LRC Plaintext Decode Failed");
+                        }
+                    }
                 } catch (e) {
-                    console.warn("LRC Decode Failed", e);
+                    console.warn("LRC Base64 Decode Failed", e);
                 }
             }
 
@@ -340,7 +361,6 @@ const getLyricsQM = async (songId: string, songInfo: any): Promise<LyricInfo | n
 // API 3: Netease (NE) - Ported from ne.py & eapi.py
 // ==========================================
 
-// LAZY LOAD KEY to prevent crash if CryptoJS is not ready
 let NE_KEY: any = null;
 
 const getNeKey = () => {

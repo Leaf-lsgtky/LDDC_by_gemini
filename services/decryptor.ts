@@ -49,7 +49,6 @@ export function qmc1Decrypt(data: Uint8Array): Uint8Array {
 // KRC (Kugou)
 // ==========================================
 
-// b"@Gaw^2tGQ61-\xce\xd2ni"
 const KRC_KEY = [64, 71, 97, 119, 94, 50, 116, 71, 81, 54, 49, 45, 206, 210, 110, 105];
 
 export function krcDecrypt(data: Uint8Array): string {
@@ -80,7 +79,6 @@ export function krcDecrypt(data: Uint8Array): string {
 // QRC (QQ Music)
 // ==========================================
 
-// b"!@#)(*$%123ZXC!@!@#)(NHL"
 const QRC_KEY_STR = "!@#)(*$%123ZXC!@!@#)(NHL";
 
 export function qrcDecrypt(data: Uint8Array): string {
@@ -88,23 +86,20 @@ export function qrcDecrypt(data: Uint8Array): string {
         if (typeof CryptoJS === 'undefined') throw new Error("CryptoJS not loaded");
         if (typeof pako === 'undefined') throw new Error("pako library not loaded");
 
-        // 1. Convert Uint8Array to WordArray for CryptoJS
         const wordArray = CryptoJS.lib.WordArray.create(data);
-        
-        // 2. Key parsing
         const keyHex = CryptoJS.enc.Utf8.parse(QRC_KEY_STR);
 
-        // 3. TripleDES Decrypt (ECB Mode)
+        // Use NoPadding. Padding errors are the most common cause of crash in ported code.
+        // pako.inflate will ignore trailing garbage bytes from the block cipher.
         const decrypted = CryptoJS.TripleDES.decrypt(
             { ciphertext: wordArray } as any,
             keyHex,
             {
                 mode: CryptoJS.mode.ECB,
-                padding: CryptoJS.pad.Pkcs7
+                padding: CryptoJS.pad.NoPadding 
             }
         );
 
-        // 4. Convert back to Uint8Array
         const decryptedBytes = convertWordArrayToUint8Array(decrypted);
 
         // 5. Decompress
@@ -113,18 +108,24 @@ export function qrcDecrypt(data: Uint8Array): string {
         // 6. Decode
         return new TextDecoder('utf-8').decode(decompressed);
     } catch (e) {
-        console.error("QRC Decrypt Failed", e);
-        throw e;
+        // Fallback: Try direct decompression (sometimes data is just zlib compressed without DES)
+        try {
+            const decompressed = pako.inflate(data);
+            return new TextDecoder('utf-8').decode(decompressed);
+        } catch (zlibError) {
+            console.error("QRC Decrypt Failed", e);
+            throw e;
+        }
     }
 }
 
 function convertWordArrayToUint8Array(wordArray: any) {
     const words = wordArray.words;
-    const sigBytes = wordArray.sigBytes;
-    
-    // Fix: Handle negative sigBytes which indicates decryption failure/padding error
+    // With NoPadding, sigBytes might be unreliable or negative if crypto-js fails to calculate it purely.
+    // We trust the word array length which represents the full block data.
+    let sigBytes = wordArray.sigBytes;
     if (sigBytes < 0) {
-        throw new Error(`Decryption failed: invalid sigBytes ${sigBytes}`);
+        sigBytes = words.length * 4;
     }
 
     const u8 = new Uint8Array(sigBytes);

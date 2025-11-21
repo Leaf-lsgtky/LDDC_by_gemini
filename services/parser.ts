@@ -23,11 +23,10 @@ export const parseAndFormatKrc = (krcContent: string): string => {
         const lineStart = parseInt(lineMatch[1]);
         const content = lineMatch[3];
 
-        let builtLine = "";
-        let hasWords = false;
+        let builtLine = `${formatTime(lineStart)}`;
         
         let match;
-        // Reset regex state
+        let hasWords = false;
         wordRegex.lastIndex = 0;
         
         while ((match = wordRegex.exec(content)) !== null) {
@@ -40,9 +39,7 @@ export const parseAndFormatKrc = (krcContent: string): string => {
         }
         
         if (!hasWords) {
-            // Fallback for lines without verbatim tags (e.g. ID tags or plain lines)
-            // If content is empty, we might still want the timestamp if it's a spacer
-            builtLine = `${formatTime(lineStart)}${content}`;
+            builtLine += content;
         }
 
         result += builtLine + "\n";
