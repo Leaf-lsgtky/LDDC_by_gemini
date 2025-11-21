@@ -289,66 +289,73 @@ const getLyricsQM = async (songId: string, songInfo: any): Promise<LyricInfo | n
         const rawQrc = lyricData.qrc;
         const rawLrc = lyricData.lyric;
         
-        // Log actual lengths
-        console.log(`[QM] QRC Field Length: ${rawQrc ? String(rawQrc).length : 0}`);
-        console.log(`[QM] LRC Field Length: ${rawLrc ? String(rawLrc).length : 0}`);
+        console.log(`[QM] QRC Len: ${rawQrc?.length}, LRC Len: ${rawLrc?.length}`);
 
         let content = "";
         let type = LyricsType.LINEBYLINE;
         let success = false;
         
-        // Helper to process byte array with all methods
-        const processBytes = (bytes: Uint8Array, label: string) => {
+        // Helper to check if string looks like lyrics
+        const isLyrics = (text: string) => text.includes('[') && text.includes(']') && (text.includes(':') || text.includes('.'));
+
+        // Helper to process byte array
+        const processBytes = (bytes: Uint8Array, label: string, isLrcField: boolean) => {
             if (bytes.length < 4) return { success: false };
 
-            // Method 1: QRC Decrypt (TripleDES)
-            // Used for encrypted content (QRC field, or encrypted LRC field)
+            // A. If it's the LRC field, TRY PLAIN TEXT FIRST (UTF-8 & GBK)
+            if (isLrcField) {
+                // 1. UTF-8
+                try {
+                    const res = new TextDecoder('utf-8').decode(bytes);
+                    if (isLyrics(res)) {
+                        console.log(`[QM] ${label} -> UTF-8 Success`);
+                        return { success: true, content: res, type: LyricsType.LINEBYLINE };
+                    }
+                } catch (e) {}
+
+                // 2. GBK (Common in older Chinese lyrics)
+                try {
+                    const res = new TextDecoder('gbk').decode(bytes);
+                    if (isLyrics(res)) {
+                        console.log(`[QM] ${label} -> GBK Success`);
+                        return { success: true, content: res, type: LyricsType.LINEBYLINE };
+                    }
+                } catch (e) {}
+            }
+
+            // B. Try QRC Decrypt (TripleDES)
             try {
                 const res = qrcDecrypt(bytes);
-                if (res && res.length > 0) {
+                // Check if result looks valid
+                if (res && res.length > 10) {
                     console.log(`[QM] ${label} -> QRC Decrypt Success`);
                     return { success: true, content: res, type: LyricsType.VERBATIM };
                 }
-            } catch (e) { 
-                // Log only significant failures, ignore common padding errors on wrong data
-            }
+            } catch (e) {}
 
-            // Method 2: Zlib Inflate
-            // Used if data is just compressed but not encrypted
+            // C. Try Direct Inflate (Zlib)
             try {
                 if (typeof pako !== 'undefined') {
                     const inflated = pako.inflate(bytes);
                     const res = new TextDecoder('utf-8').decode(inflated);
-                    if (res && res.length > 0) {
+                    if (res && res.length > 10) {
                         console.log(`[QM] ${label} -> Zlib Inflate Success`);
                         return { success: true, content: res, type: LyricsType.LINEBYLINE };
                     }
                 }
-            } catch (e) { /* ignore inflate errors on random data */ }
+            } catch (e) {}
 
-            // Method 3: Plain UTF-8
-            // Used for standard LRC that was just Base64 encoded
-            try {
-                const res = new TextDecoder('utf-8').decode(bytes);
-                // Simple heuristic to verify it's actual text/lyrics
-                // Look for time tags like [00:00] or metadata tags
-                if (res.includes('[') && res.includes(']') && (res.includes(':') || res.includes('.'))) {
-                    console.log(`[QM] ${label} -> UTF-8 Decode Success`);
-                    return { success: true, content: res, type: LyricsType.LINEBYLINE };
-                }
-            } catch (e) { /* ignore */ }
-            
             return { success: false };
         };
 
-        // A. Process QRC Field (Hex Encoded)
-        if (rawQrc && String(rawQrc).length > 10) {
+        // 1. Process QRC Field (Hex Encoded)
+        if (rawQrc && String(rawQrc).length > 10) { 
             try {
                 const hex = String(rawQrc);
                 const match = hex.match(/.{1,2}/g);
                 if (match) {
                     const bytes = new Uint8Array(match.map((byte:string) => parseInt(byte, 16)));
-                    const res = processBytes(bytes, "QRC_Field");
+                    const res = processBytes(bytes, "QRC_Field", false);
                     if (res.success) {
                         content = res.content!;
                         type = res.type!;
@@ -356,11 +363,11 @@ const getLyricsQM = async (songId: string, songInfo: any): Promise<LyricInfo | n
                     }
                 }
             } catch (e) {
-                console.warn("[QM] QRC Field Hex Parse Error", e);
+                console.warn("[QM] QRC Hex Error", e);
             }
         } 
         
-        // B. Process Lyric Field (Base64 Encoded) - Fallback if QRC failed
+        // 2. Process Lyric Field (Base64 Encoded) - Fallback
         if (!success && rawLrc && String(rawLrc).length > 10) {
             console.log("[QM] Trying LRC Field Fallback");
             try {
@@ -370,21 +377,18 @@ const getLyricsQM = async (songId: string, songInfo: any): Promise<LyricInfo | n
                     bytes[i] = binaryString.charCodeAt(i);
                 }
                 
-                // Attempt to process LRC field as encrypted QRC, Zlib, or Plaintext
-                const res = processBytes(bytes, "LRC_Field");
+                const res = processBytes(bytes, "LRC_Field", true);
                 if (res.success) {
                     content = res.content!;
                     type = res.type!;
                     success = true;
                 }
             } catch (e) {
-                console.warn("[QM] LRC Field Base64 Decode Error", e);
+                console.warn("[QM] LRC Base64 Error", e);
             }
         }
 
         if (success) {
-            // TODO: If content is XML (common in QRC), parse it here if needed.
-            // Current parser.ts mainly handles KRC. QRC XML might need stripping tags.
             return {
                 id: songId,
                 songId: songInfo.id,
@@ -395,7 +399,7 @@ const getLyricsQM = async (songId: string, songInfo: any): Promise<LyricInfo | n
                 type: type
             }
         } else {
-            console.error("[QM] All decryption attempts failed");
+            console.error("[QM] Failed to resolve lyrics.");
         }
 
     } catch(e) {

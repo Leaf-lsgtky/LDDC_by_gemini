@@ -1,173 +1,160 @@
-// ... imports
+/**
+ * LDDC Core Decryption Logic (Ported to TypeScript)
+ * Requires: crypto-js, pako
+ */
 
-// ... existing code ...
-
-const getLyricsQM = async (songId: string, songInfo: any): Promise<LyricInfo | null> => {
-    try {
-        const cleanId = String(songId).replace(/^qm-/, '');
-        const songIDInt = parseInt(cleanId);
-        
-        console.log(`[QM] Requesting ID: ${songIDInt}`);
-
-        const body = {
-            comm: { ct: 11, cv: "1003006", v: "1003006", tmeAppID: "qqmusiclight", nettype: "NETWORK_WIFI", udid: "0" },
-            request: {
-                method: "GetPlayLyricInfo",
-                module: "music.musichallSong.PlayLyricInfo",
-                param: {
-                    songID: songIDInt,
-                    songName: btoa(unescape(encodeURIComponent(songInfo.title))),
-                    albumName: btoa(unescape(encodeURIComponent(songInfo.album || ""))),
-                    singerName: btoa(unescape(encodeURIComponent(songInfo.artist))),
-                    qrc: 1, qrc_t: 0, trans: 1, trans_t: 0, type: 0
-                }
-            }
-        };
-
-        const response = await fetch("https://u.y.qq.com/cgi-bin/musicu.fcg", {
-            method: "POST",
-            body: JSON.stringify(body)
-        });
-        
-        if (!response.ok) {
-            console.error(`[QM] Fetch Failed: ${response.status}`);
-            return null;
-        }
-
-        const data = await response.json();
-        const lyricData = data.request?.data;
-        
-        if (!lyricData) {
-            console.error("[QM] No lyricData");
-            return null;
-        }
-        
-        const rawQrc = lyricData.qrc;
-        const rawLrc = lyricData.lyric;
-        
-        console.log(`[QM] QRC Len: ${rawQrc?.length}, LRC Len: ${rawLrc?.length}`);
-
-        let content = "";
-        let type = LyricsType.LINEBYLINE;
-        let success = false;
-        
-        // Helper to check if string looks like lyrics
-        const isLyrics = (text: string) => text.includes('[') && text.includes(']') && (text.includes(':') || text.includes('.'));
-
-        // Helper to process byte array
-        const processBytes = (bytes: Uint8Array, label: string, isLrcField: boolean) => {
-            if (bytes.length < 4) return { success: false };
-
-            // A. If it's the LRC field, TRY PLAIN TEXT FIRST (UTF-8 & GBK)
-            // This fixes the issue where we tried to decrypt plain text and failed.
-            if (isLrcField) {
-                // 1. UTF-8
-                try {
-                    const res = new TextDecoder('utf-8').decode(bytes);
-                    if (isLyrics(res)) {
-                        console.log(`[QM] ${label} -> UTF-8 Success`);
-                        return { success: true, content: res, type: LyricsType.LINEBYLINE };
-                    }
-                } catch (e) {}
-
-                // 2. GBK (Common in older Chinese lyrics)
-                try {
-                    const res = new TextDecoder('gbk').decode(bytes);
-                    if (isLyrics(res)) {
-                        console.log(`[QM] ${label} -> GBK Success`);
-                        return { success: true, content: res, type: LyricsType.LINEBYLINE };
-                    }
-                } catch (e) {}
-            }
-
-            // B. Try QRC Decrypt (TripleDES)
-            try {
-                const res = qrcDecrypt(bytes);
-                // Check if result looks valid (e.g., XML or Lyric structure)
-                if (res && res.length > 10) {
-                    console.log(`[QM] ${label} -> QRC Decrypt Success`);
-                    // QRC is often XML-like or strict format, assume Verbatim
-                    return { success: true, content: res, type: LyricsType.VERBATIM };
-                }
-            } catch (e) { 
-                // console.log(`[QM] ${label} -> QRC Decrypt Failed: ${e}`);
-            }
-
-            // C. Try Direct Inflate (Zlib)
-            try {
-                if (typeof pako !== 'undefined') {
-                    const inflated = pako.inflate(bytes);
-                    const res = new TextDecoder('utf-8').decode(inflated);
-                    if (res && res.length > 10) {
-                        console.log(`[QM] ${label} -> Zlib Inflate Success`);
-                        return { success: true, content: res, type: LyricsType.LINEBYLINE };
-                    }
-                }
-            } catch (e) {}
-
-            return { success: false };
-        };
-
-        // 1. Process QRC Field (Hex Encoded)
-        if (rawQrc && String(rawQrc).length > 10) { // Ignore short/empty/0 values
-            try {
-                const hex = String(rawQrc);
-                const match = hex.match(/.{1,2}/g);
-                if (match) {
-                    const bytes = new Uint8Array(match.map((byte:string) => parseInt(byte, 16)));
-                    const res = processBytes(bytes, "QRC_Field", false);
-                    if (res.success) {
-                        content = res.content!;
-                        type = res.type!;
-                        success = true;
-                    }
-                }
-            } catch (e) {
-                console.warn("[QM] QRC Hex Error", e);
-            }
-        } 
-        
-        // 2. Process Lyric Field (Base64 Encoded) - Fallback
-        if (!success && rawLrc && String(rawLrc).length > 10) {
-            console.log("[QM] Trying LRC Field Fallback");
-            try {
-                const binaryString = atob(rawLrc);
-                const bytes = new Uint8Array(binaryString.length);
-                for (let i = 0; i < binaryString.length; i++) {
-                    bytes[i] = binaryString.charCodeAt(i);
-                }
-                
-                const res = processBytes(bytes, "LRC_Field", true);
-                if (res.success) {
-                    content = res.content!;
-                    type = res.type!;
-                    success = true;
-                }
-            } catch (e) {
-                console.warn("[QM] LRC Base64 Error", e);
-            }
-        }
-
-        if (success) {
-            // QRC content formatting hook (if it's XML, we might need to parse it)
-            // For now, we assume decryptor returns raw text or XML that is readable enough.
-            return {
-                id: songId,
-                songId: songInfo.id,
-                source: Source.QM,
-                title: songInfo.title,
-                artist: songInfo.artist,
-                content: content,
-                type: type
-            }
-        } else {
-            console.error("[QM] Failed to resolve lyrics.");
-        }
-
-    } catch(e) {
-        console.error("[QM] Critical Error", e);
-    }
-    return null;
+declare global {
+    var CryptoJS: any;
+    var pako: any;
 }
 
-// ... rest of file
+// ==========================================
+// QMC1 (QQ Music)
+// ==========================================
+
+const QMC_PRIVKEY = [
+    0xc3, 0x4a, 0xd6, 0xca, 0x90, 0x67, 0xf7, 0x52,
+    0xd8, 0xa1, 0x66, 0x62, 0x9f, 0x5b, 0x09, 0x00,
+    0xc3, 0x5e, 0x95, 0x23, 0x9f, 0x13, 0x11, 0x7e,
+    0xd8, 0x92, 0x3f, 0xbc, 0x90, 0xbb, 0x74, 0x0e,
+    0xc3, 0x47, 0x74, 0x3d, 0x90, 0xaa, 0x3f, 0x51,
+    0xd8, 0xf4, 0x11, 0x84, 0x9f, 0xde, 0x95, 0x1d,
+    0xc3, 0xc6, 0x09, 0xd5, 0x9f, 0xfa, 0x66, 0xf9,
+    0xd8, 0xf0, 0xf7, 0xa0, 0x90, 0xa1, 0xd6, 0xf3,
+    0xc3, 0xf3, 0xd6, 0xa1, 0x90, 0xa0, 0xf7, 0xf0,
+    0xd8, 0xf9, 0x66, 0xfa, 0x9f, 0xd5, 0x09, 0xc6,
+    0xc3, 0x1d, 0x95, 0xde, 0x9f, 0x84, 0x11, 0xf4,
+    0xd8, 0x51, 0x3f, 0xaa, 0x90, 0x3d, 0x74, 0x47,
+    0xc3, 0x0e, 0x74, 0xbb, 0x90, 0xbc, 0x3f, 0x92,
+    0xd8, 0x7e, 0x11, 0x13, 0x9f, 0x23, 0x95, 0x5e,
+    0xc3, 0x00, 0x09, 0x5b, 0x9f, 0x62, 0x66, 0xa1,
+    0xd8, 0x52, 0xf7, 0x67, 0x90, 0xca, 0xd6, 0x4a,
+];
+
+export function qmc1Decrypt(data: Uint8Array): Uint8Array {
+    for (let i = 0; i < data.length; i++) {
+        let keyIndex;
+        if (i > 0x7FFF) {
+            keyIndex = (i % 0x7FFF) & 0x7F;
+        } else {
+            keyIndex = i & 0x7F;
+        }
+        data[i] ^= QMC_PRIVKEY[keyIndex];
+    }
+    return data;
+}
+
+// ==========================================
+// KRC (Kugou)
+// ==========================================
+
+const KRC_KEY = [64, 71, 97, 119, 94, 50, 116, 71, 81, 54, 49, 45, 206, 210, 110, 105];
+
+export function krcDecrypt(data: Uint8Array): string {
+    try {
+        // 1. Skip first 4 bytes
+        if (!data || data.length <= 4) throw new Error("KRC Data too short");
+        const sliced = data.slice(4);
+
+        // 2. XOR
+        const xored = new Uint8Array(sliced.length);
+        for (let i = 0; i < sliced.length; i++) {
+            xored[i] = sliced[i] ^ KRC_KEY[i % KRC_KEY.length];
+        }
+
+        // 3. Decompress (zlib)
+        if (typeof pako === 'undefined') throw new Error("pako library not loaded");
+        
+        try {
+            const decompressed = pako.inflate(xored);
+            return new TextDecoder('utf-8').decode(decompressed);
+        } catch (pakoErr) {
+            console.error("KRC inflat error", pakoErr);
+            // If inflate fails, maybe it's not compressed? Try decode directly
+            return new TextDecoder('utf-8').decode(xored);
+        }
+    } catch (e) {
+        console.error("KRC Decrypt Failed", e);
+        throw e;
+    }
+}
+
+// ==========================================
+// QRC (QQ Music)
+// ==========================================
+
+const QRC_KEY_STR = "!@#)(*$%123ZXC!@!@#)(NHL";
+
+export function qrcDecrypt(data: Uint8Array): string {
+    // Fix: Ensure data is not empty/undefined before processing
+    if (!data || data.length === 0) {
+        throw new Error("QRC Input data is empty or undefined");
+    }
+
+    try {
+        if (typeof CryptoJS === 'undefined') throw new Error("CryptoJS not loaded");
+        if (typeof pako === 'undefined') throw new Error("pako library not loaded");
+
+        // console.log(`[QRC Decrypt] Input size: ${data.length} bytes`);
+
+        const wordArray = CryptoJS.lib.WordArray.create(data);
+        const keyHex = CryptoJS.enc.Utf8.parse(QRC_KEY_STR);
+
+        // Use NoPadding to prevent Pkcs7 errors. pako will ignore trailing garbage.
+        const decrypted = CryptoJS.TripleDES.decrypt(
+            { ciphertext: wordArray } as any,
+            keyHex,
+            {
+                mode: CryptoJS.mode.ECB,
+                padding: CryptoJS.pad.NoPadding 
+            }
+        );
+
+        const decryptedBytes = convertWordArrayToUint8Array(decrypted);
+        
+        if (decryptedBytes.length === 0) {
+             throw new Error("DES Decryption resulted in empty data");
+        }
+
+        // 5. Decompress
+        // We wrap pako in a try-catch to provide specific logging
+        try {
+            const decompressed = pako.inflate(decryptedBytes);
+            return new TextDecoder('utf-8').decode(decompressed);
+        } catch (inflateErr) {
+            throw inflateErr;
+        }
+
+    } catch (e) {
+        // console.warn("QRC Decrypt Error:", e);
+        
+        // Fallback: Try direct decompression (sometimes data is just zlib compressed without DES)
+        try {
+            // console.log("[QRC Decrypt] Trying Direct Inflate Fallback...");
+            const decompressed = pako.inflate(data);
+            return new TextDecoder('utf-8').decode(decompressed);
+        } catch (zlibError) {
+            // console.error("QRC Decrypt Fallback Failed", zlibError);
+            throw e;
+        }
+    }
+}
+
+function convertWordArrayToUint8Array(wordArray: any) {
+    const words = wordArray.words;
+    // With NoPadding, sigBytes might be unreliable or negative if crypto-js fails to calculate it purely.
+    // We trust the word array length which represents the full block data.
+    let sigBytes = wordArray.sigBytes;
+    if (sigBytes < 0) {
+        // If sigBytes is invalid, calculate from words length
+        // Each word is 4 bytes
+        sigBytes = words.length * 4;
+    }
+
+    const u8 = new Uint8Array(sigBytes);
+    for (let i = 0; i < sigBytes; i++) {
+        const byte = (words[i >>> 2] >>> (24 - (i % 4) * 8)) & 0xff;
+        u8[i] = byte;
+    }
+    return u8;
+}
