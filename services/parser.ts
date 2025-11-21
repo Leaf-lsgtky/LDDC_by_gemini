@@ -23,6 +23,7 @@ export const parseAndFormatKrc = (krcContent: string): string => {
         const lineStart = parseInt(lineMatch[1]);
         const content = lineMatch[3];
 
+        // Start with line timestamp
         let builtLine = `${formatTime(lineStart)}`;
         
         let match;
@@ -35,6 +36,7 @@ export const parseAndFormatKrc = (krcContent: string): string => {
             const text = match[3];
             const wordStartAbs = lineStart + wordStartRel;
             
+            // Format: [Time]Word
             builtLine += `${formatTime(wordStartAbs)}${text}`;
         }
         

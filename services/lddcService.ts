@@ -1,3 +1,4 @@
+
 import { SongInfo, Source, ProcessStatus, LyricsType, LyricInfo, SearchResult } from '../types';
 import { krcDecrypt, qrcDecrypt } from './decryptor';
 import { parseAndFormatKrc, decodeBase64Utf8 } from './parser';
@@ -62,7 +63,7 @@ const signKG = (params: Record<string, any>) => {
 
 const searchKG = async (keyword: string): Promise<SearchResult[]> => {
     if (!CONFIG.sources[Source.KG]) return [];
-    if (typeof CryptoJS === 'undefined') return [];
+    if (typeof CryptoJS === 'undefined') return []; // Safety check
 
     try {
         const params = {
@@ -96,7 +97,7 @@ const searchKG = async (keyword: string): Promise<SearchResult[]> => {
         if (data.status === 1 && data.data && data.data.lists) {
             return data.data.lists.map((item: any) => ({
                 id: `kg-${item.ID}`, 
-                lyricId: item.FileHash,
+                lyricId: item.FileHash, // KG uses Hash for lyrics
                 title: item.SongName,
                 artist: item.SingerName,
                 album: item.AlbumName,
@@ -113,6 +114,7 @@ const searchKG = async (keyword: string): Promise<SearchResult[]> => {
 const getLyricsKG = async (hash: string, songInfo: any): Promise<LyricInfo | null> => {
     if (typeof CryptoJS === 'undefined') return null;
     try {
+        // 1. Search candidates
         const searchParams = {
             appid: "3116",
             clienttime: Math.floor(Date.now() / 1000),
@@ -133,6 +135,7 @@ const getLyricsKG = async (hash: string, songInfo: any): Promise<LyricInfo | nul
         if (searchData.status === 200 && searchData.candidates && searchData.candidates.length > 0) {
             const bestMatch = searchData.candidates[0];
             
+            // 2. Download
             const downloadParams = {
                 accesskey: bestMatch.accesskey,
                 appid: "3116",
@@ -286,9 +289,9 @@ const getLyricsQM = async (songId: string, songInfo: any): Promise<LyricInfo | n
         const rawQrc = lyricData.qrc;
         const rawLrc = lyricData.lyric;
         
-        // Debug Logs
-        if (rawQrc) console.log(`[QM] QRC Hex Length: ${rawQrc.length}`);
-        if (rawLrc) console.log(`[QM] LRC Base64 Length: ${rawLrc.length}`);
+        // Log lengths safely
+        console.log(`[QM] QRC Hex Length: ${rawQrc ? rawQrc.length : 'undefined'}`);
+        console.log(`[QM] LRC Base64 Length: ${rawLrc ? rawLrc.length : 'undefined'}`);
 
         let content = "";
         let type = LyricsType.LINEBYLINE;
@@ -300,13 +303,15 @@ const getLyricsQM = async (songId: string, songInfo: any): Promise<LyricInfo | n
             try {
                 const res = qrcDecrypt(bytes);
                 console.log(`[QM] ${label} -> QRC Decrypt Success`);
-                // TODO: Parse QRC XML/Format if needed
+                // QM QRC is usually XML based, we might need to format it to LRC
+                // But often it comes as parsed content or we need to run parseAndFormatKrc style logic if it's structured
+                // For now, return raw decrypted text which is better than garbage.
                 return { success: true, content: res, type: LyricsType.VERBATIM };
             } catch (e) {
-                console.log(`[QM] ${label} -> QRC Decrypt Failed`);
+                console.log(`[QM] ${label} -> QRC Decrypt Failed:`, e);
             }
 
-            // 2. Try Direct Inflate (Zlib) - Fix for "Garbled Text"
+            // 2. Try Direct Inflate (Zlib) - Fix for "Garbled Text" (Mojibake)
             try {
                 if (typeof pako !== 'undefined') {
                     const inflated = pako.inflate(bytes);
@@ -322,7 +327,7 @@ const getLyricsQM = async (songId: string, songInfo: any): Promise<LyricInfo | n
             try {
                 const res = new TextDecoder('utf-8').decode(bytes);
                 // Basic validation to check if it looks like lyrics
-                if (res.includes('[') || res.includes('ti:')) {
+                if (res.includes('[') && res.includes(']')) {
                     console.log(`[QM] ${label} -> UTF-8 Decode Success`);
                     return { success: true, content: res, type: LyricsType.LINEBYLINE };
                 }
@@ -350,8 +355,9 @@ const getLyricsQM = async (songId: string, songInfo: any): Promise<LyricInfo | n
             }
         } 
         
-        // B. Try Lyric Field (Base64 Encoded)
+        // B. Try Lyric Field (Base64 Encoded) - Fallback
         if (!success && rawLrc && String(rawLrc).length > 0) {
+            console.log("[QM] Trying LRC Field Fallback");
             try {
                 const binaryString = atob(rawLrc);
                 const bytes = new Uint8Array(binaryString.length);
@@ -359,6 +365,7 @@ const getLyricsQM = async (songId: string, songInfo: any): Promise<LyricInfo | n
                     bytes[i] = binaryString.charCodeAt(i);
                 }
                 
+                // Treat 'lyric' field as potential encrypted/compressed data too
                 const result = tryProcessBytes(bytes, "LRC_Field");
                 if (result.success) {
                     content = result.content!;
@@ -371,6 +378,10 @@ const getLyricsQM = async (songId: string, songInfo: any): Promise<LyricInfo | n
         }
 
         if (success) {
+            // Post-process content if it's XML (common in QRC)
+            // If it contains <Lyric_1>, it needs parsing.
+            // We can reuse parseAndFormatKrc logic or simple cleanup.
+            // For now, raw decrypted is returned.
             return {
                 id: songId,
                 songId: songInfo.id,

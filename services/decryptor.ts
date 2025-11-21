@@ -1,3 +1,4 @@
+
 /**
  * LDDC Core Decryption Logic (Ported to TypeScript)
  * Requires: crypto-js, pako
@@ -53,7 +54,7 @@ const KRC_KEY = [64, 71, 97, 119, 94, 50, 116, 71, 81, 54, 49, 45, 206, 210, 110
 export function krcDecrypt(data: Uint8Array): string {
     try {
         // 1. Skip first 4 bytes
-        if (data.length <= 4) throw new Error("Data too short");
+        if (!data || data.length <= 4) throw new Error("KRC Data too short");
         const sliced = data.slice(4);
 
         // 2. XOR
@@ -64,10 +65,15 @@ export function krcDecrypt(data: Uint8Array): string {
 
         // 3. Decompress (zlib)
         if (typeof pako === 'undefined') throw new Error("pako library not loaded");
-        const decompressed = pako.inflate(xored);
         
-        // 4. Decode UTF-8
-        return new TextDecoder('utf-8').decode(decompressed);
+        try {
+            const decompressed = pako.inflate(xored);
+            return new TextDecoder('utf-8').decode(decompressed);
+        } catch (pakoErr) {
+            console.error("KRC inflat error", pakoErr);
+            // If inflate fails, maybe it's not compressed? Try decode directly
+            return new TextDecoder('utf-8').decode(xored);
+        }
     } catch (e) {
         console.error("KRC Decrypt Failed", e);
         throw e;
@@ -81,18 +87,20 @@ export function krcDecrypt(data: Uint8Array): string {
 const QRC_KEY_STR = "!@#)(*$%123ZXC!@!@#)(NHL";
 
 export function qrcDecrypt(data: Uint8Array): string {
+    if (!data || data.length === 0) {
+        throw new Error("QRC Input data is empty");
+    }
+
     try {
         if (typeof CryptoJS === 'undefined') throw new Error("CryptoJS not loaded");
         if (typeof pako === 'undefined') throw new Error("pako library not loaded");
 
+        console.log(`[QRC Decrypt] Input size: ${data.length} bytes`);
+
         const wordArray = CryptoJS.lib.WordArray.create(data);
         const keyHex = CryptoJS.enc.Utf8.parse(QRC_KEY_STR);
 
-        // Log data size for debug
-        console.log(`[QRC Decrypt] Input size: ${data.length} bytes`);
-
-        // Use NoPadding. Padding errors are the most common cause of crash in ported code.
-        // pako.inflate will ignore trailing garbage bytes from the block cipher.
+        // Use NoPadding to prevent Pkcs7 errors. pako will ignore trailing garbage.
         const decrypted = CryptoJS.TripleDES.decrypt(
             { ciphertext: wordArray } as any,
             keyHex,
@@ -103,14 +111,24 @@ export function qrcDecrypt(data: Uint8Array): string {
         );
 
         const decryptedBytes = convertWordArrayToUint8Array(decrypted);
+        
+        if (decryptedBytes.length === 0) {
+             throw new Error("DES Decryption resulted in empty data");
+        }
+
         console.log(`[QRC Decrypt] DES output size: ${decryptedBytes.length} bytes`);
 
         // 5. Decompress
-        const decompressed = pako.inflate(decryptedBytes);
-        console.log(`[QRC Decrypt] Inflated size: ${decompressed.length} bytes`);
+        // We wrap pako in a try-catch to provide specific logging
+        try {
+            const decompressed = pako.inflate(decryptedBytes);
+            console.log(`[QRC Decrypt] Inflated size: ${decompressed.length} bytes`);
+            return new TextDecoder('utf-8').decode(decompressed);
+        } catch (inflateErr) {
+            console.warn("[QRC Decrypt] Inflate failed on DES output, data might not be compressed or key wrong.");
+            throw inflateErr;
+        }
 
-        // 6. Decode
-        return new TextDecoder('utf-8').decode(decompressed);
     } catch (e) {
         console.warn("QRC Decrypt Error:", e);
         
@@ -132,6 +150,8 @@ function convertWordArrayToUint8Array(wordArray: any) {
     // We trust the word array length which represents the full block data.
     let sigBytes = wordArray.sigBytes;
     if (sigBytes < 0) {
+        // If sigBytes is invalid, calculate from words length
+        // Each word is 4 bytes
         sigBytes = words.length * 4;
     }
 
