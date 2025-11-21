@@ -32,38 +32,6 @@ export const getConfig = () => CONFIG;
 // ==========================================
 // Global State & Helpers
 // ==========================================
-import { krcDecrypt, qrcDecrypt } from './decryptor';
-
-// ==========================================
-// Configuration & Persistence
-// ==========================================
-
-let CONFIG = {
-    sources: {
-        [Source.QM]: localStorage.getItem('cfg_source_qm') !== 'false',
-        [Source.KG]: localStorage.getItem('cfg_source_kg') !== 'false',
-        [Source.NE]: localStorage.getItem('cfg_source_ne') !== 'false',
-        [Source.LRCLIB]: localStorage.getItem('cfg_source_lrclib') !== 'false',
-    },
-    minScore: parseInt(localStorage.getItem('cfg_min_score') || '60'),
-    autoSave: localStorage.getItem('cfg_auto_save') === 'true'
-};
-
-export const updateConfig = (newConfig: typeof CONFIG) => {
-    CONFIG = newConfig;
-    localStorage.setItem('cfg_source_qm', String(newConfig.sources[Source.QM]));
-    localStorage.setItem('cfg_source_kg', String(newConfig.sources[Source.KG]));
-    localStorage.setItem('cfg_source_ne', String(newConfig.sources[Source.NE]));
-    localStorage.setItem('cfg_source_lrclib', String(newConfig.sources[Source.LRCLIB]));
-    localStorage.setItem('cfg_min_score', String(newConfig.minScore));
-    localStorage.setItem('cfg_auto_save', String(newConfig.autoSave));
-};
-
-export const getConfig = () => CONFIG;
-
-// ==========================================
-// Global State & Helpers
-// ==========================================
 
 const DELAY = (ms: number) => new Promise(res => setTimeout(res, ms));
 export let MOCK_SONGS: SongInfo[] = [];
@@ -72,7 +40,6 @@ declare global {
     interface Window {
         jsmediatags: any;
     }
-    var CryptoJS: any;
     var CryptoJS: any;
 }
 
@@ -549,9 +516,7 @@ const extractMetadata = (file: File): Promise<{ title?: string; artist?: string;
                     coverUrl = `data:${format};base64,${window.btoa(base64String)}`;
                 }
                 resolve({ title: tags.title, artist: tags.artist, album: tags.album, coverUrl });
-                resolve({ title: tags.title, artist: tags.artist, album: tags.album, coverUrl });
             },
-            onError: () => resolve({})
             onError: () => resolve({})
         });
     });
@@ -619,68 +584,11 @@ export const searchOnlineLyrics = async (keyword: string): Promise<SearchResult[
 
     const results = await Promise.all(promises);
     return results.flat();
-export const searchOnlineLyrics = async (keyword: string): Promise<SearchResult[]> => {
-    const promises: Promise<SearchResult[]>[] = [];
-
-    // 1. Lrclib
-    if (CONFIG.sources[Source.LRCLIB]) {
-        promises.push(fetch(`https://lrclib.net/api/search?q=${encodeURIComponent(keyword)}`)
-            .then(r => r.json())
-            .then(data => Array.isArray(data) ? data.slice(0, 10).map((item: any) => ({
-                id: `lrclib-${item.id}`,
-                lyricId: item.id.toString(),
-                title: item.trackName,
-                artist: item.artistName,
-                album: item.albumName,
-                source: Source.LRCLIB,
-                type: item.syncedLyrics ? LyricsType.LINEBYLINE : LyricsType.PlainText
-            })) : [])
-            .catch(() => [])
-        );
-    }
-
-    // 2. Real Sources
-    promises.push(searchKG(keyword));
-    promises.push(searchQM(keyword));
-    promises.push(searchNE(keyword));
-
-    const results = await Promise.all(promises);
-    return results.flat();
 };
 
 export const getLyricsContent = async (songId: string, specificLyricId?: string): Promise<LyricInfo | null> => {
     const song = getSongById(songId);
     if (!song) return null;
-
-    const lyricIdToUse = specificLyricId || (song as any)._tempLyricId || song.id;
-    const sourceToUse = song.source;
-
-    if (sourceToUse === Source.KG) {
-        return getLyricsKG(lyricIdToUse, song);
-    }
-    
-    if (sourceToUse === Source.QM) {
-        return getLyricsQM(lyricIdToUse, song);
-    }
-
-    if (sourceToUse === Source.NE) {
-        return getLyricsNE(lyricIdToUse, song);
-    }
-
-    // Fallback / Lrclib
-    try {
-        const response = await fetch(`https://lrclib.net/api/get/${lyricIdToUse}`);
-        const match = await response.json();
-        return {
-            id: match.id.toString(),
-            songId: songId,
-            source: Source.LRCLIB,
-            title: match.trackName,
-            artist: match.artistName,
-            content: match.syncedLyrics || match.plainLyrics || "",
-            type: match.syncedLyrics ? LyricsType.LINEBYLINE : LyricsType.PlainText
-        };
-    } catch(e) {}
 
     const lyricIdToUse = specificLyricId || (song as any)._tempLyricId || song.id;
     const sourceToUse = song.source;
@@ -738,31 +646,7 @@ export const autoFetchLyrics = async (song: SongInfo): Promise<SongInfo> => {
     return updated;
 };
 
-export const autoFetchLyrics = async (song: SongInfo): Promise<SongInfo> => {
-    const results = await searchOnlineLyrics(`${song.artist} ${song.title}`);
-    if (results.length > 0) {
-        // Simple auto-match: Prefer Verbatim, then first result
-        const best = results.find(r => r.type === LyricsType.VERBATIM) || results[0];
-        
-        const updated = {
-            ...song,
-            status: ProcessStatus.MATCHED,
-            source: best.source,
-            lyricsType: best.type
-        };
-        (updated as any)._tempLyricId = best.lyricId; // Store ID for fetch
-        
-        MOCK_SONGS = MOCK_SONGS.map(s => s.id === song.id ? updated : s);
-        return updated;
-    }
-    
-    const updated = { ...song, status: ProcessStatus.FAILED };
-    MOCK_SONGS = MOCK_SONGS.map(s => s.id === song.id ? updated : s);
-    return updated;
-};
-
 export const applyLyricsToSong = async (songId: string, result: SearchResult): Promise<void> => {
-    await DELAY(50);
     await DELAY(50);
     const song = MOCK_SONGS.find(s => s.id === songId);
     if (song) {
@@ -770,16 +654,8 @@ export const applyLyricsToSong = async (songId: string, result: SearchResult): P
         song.source = result.source;
         song.lyricsType = result.type;
         (song as any)._tempLyricId = result.lyricId;
-        (song as any)._tempLyricId = result.lyricId;
         MOCK_SONGS = [...MOCK_SONGS];
     }
-};
-
-export const saveLyricsToTag = async (song: SongInfo): Promise<SongInfo> => {
-    await DELAY(200);
-    const updated = { ...song, status: ProcessStatus.SAVED };
-    MOCK_SONGS = MOCK_SONGS.map(s => s.id === song.id ? updated : s);
-    return updated;
 };
 
 export const saveLyricsToTag = async (song: SongInfo): Promise<SongInfo> => {
