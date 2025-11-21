@@ -121,6 +121,12 @@ export function qrcDecrypt(data: Uint8Array): string {
 function convertWordArrayToUint8Array(wordArray: any) {
     const words = wordArray.words;
     const sigBytes = wordArray.sigBytes;
+    
+    // Fix: Handle negative sigBytes which indicates decryption failure/padding error
+    if (sigBytes < 0) {
+        throw new Error(`Decryption failed: invalid sigBytes ${sigBytes}`);
+    }
+
     const u8 = new Uint8Array(sigBytes);
     for (let i = 0; i < sigBytes; i++) {
         const byte = (words[i >>> 2] >>> (24 - (i % 4) * 8)) & 0xff;

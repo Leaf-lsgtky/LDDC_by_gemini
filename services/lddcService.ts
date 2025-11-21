@@ -1,4 +1,3 @@
-
 import { SongInfo, Source, ProcessStatus, LyricsType, LyricInfo, SearchResult } from '../types';
 import { krcDecrypt, qrcDecrypt } from './decryptor';
 
@@ -61,7 +60,7 @@ const signKG = (params: Record<string, any>) => {
 
 const searchKG = async (keyword: string): Promise<SearchResult[]> => {
     if (!CONFIG.sources[Source.KG]) return [];
-    if (typeof CryptoJS === 'undefined') return [];
+    if (typeof CryptoJS === 'undefined') return []; // Safety check
 
     try {
         const params = {
@@ -82,7 +81,8 @@ const searchKG = async (keyword: string): Promise<SearchResult[]> => {
         const signature = signKG(params);
         const query = new URLSearchParams({ ...params, signature } as any).toString();
         
-        const response = await fetch(`http://complexsearch.kugou.com/v2/search/song?${query}`, {
+        // Use HTTPS to avoid Cleartext Traffic errors on Android
+        const response = await fetch(`https://complexsearch.kugou.com/v2/search/song?${query}`, {
             method: 'GET',
             headers: {
                 'User-Agent': 'Android14-1070-11070-201-0-SearchSong-wifi',
@@ -95,7 +95,7 @@ const searchKG = async (keyword: string): Promise<SearchResult[]> => {
         if (data.status === 1 && data.data && data.data.lists) {
             return data.data.lists.map((item: any) => ({
                 id: `kg-${item.ID}`, 
-                lyricId: item.FileHash, 
+                lyricId: item.FileHash, // KG uses Hash for lyrics
                 title: item.SongName,
                 artist: item.SingerName,
                 album: item.AlbumName,
@@ -146,7 +146,8 @@ const getLyricsKG = async (hash: string, songInfo: any): Promise<LyricInfo | nul
                 ver: 1
             };
             const downloadSig = signKG(downloadParams);
-            const downloadUrl = `http://lyrics.kugou.com/download?${new URLSearchParams({ ...downloadParams, signature: downloadSig } as any)}`;
+            // Use HTTPS
+            const downloadUrl = `https://lyrics.kugou.com/download?${new URLSearchParams({ ...downloadParams, signature: downloadSig } as any)}`;
             
             const dlResp = await fetch(downloadUrl);
             const dlData = await dlResp.json();
@@ -281,35 +282,47 @@ const getLyricsQM = async (songId: string, songInfo: any): Promise<LyricInfo | n
             // Priority: QRC > Lyric
             const rawQrc = lyricData.qrc;
             const rawLrc = lyricData.lyric;
+            let content = "";
+            let type = LyricsType.LINEBYLINE;
+            let success = false;
             
             if (rawQrc) {
-                // Fix: Force convert to string to avoid TypeError
-                const hex = String(rawQrc);
-                if (hex) {
-                    const match = hex.match(/.{1,2}/g);
-                    if (match) {
-                        const bytes = new Uint8Array(match.map((byte:string) => parseInt(byte, 16)));
-                        const content = qrcDecrypt(bytes);
-                        return {
-                            id: songId,
-                            songId: songInfo.id,
-                            source: Source.QM,
-                            title: songInfo.title,
-                            artist: songInfo.artist,
-                            content: content,
-                            type: LyricsType.VERBATIM
+                try {
+                    // Fix: Force convert to string to avoid TypeError
+                    const hex = String(rawQrc);
+                    if (hex) {
+                        const match = hex.match(/.{1,2}/g);
+                        if (match) {
+                            const bytes = new Uint8Array(match.map((byte:string) => parseInt(byte, 16)));
+                            content = qrcDecrypt(bytes);
+                            type = LyricsType.VERBATIM;
+                            success = true;
                         }
                     }
+                } catch (e) {
+                    console.warn("QRC Decrypt Failed, falling back to LRC", e);
                 }
-            } else if (rawLrc) {
+            } 
+            
+            if (!success && rawLrc) {
+                try {
+                    content = atob(rawLrc); // Standard LRC is base64
+                    type = LyricsType.LINEBYLINE;
+                    success = true;
+                } catch (e) {
+                    console.warn("LRC Decode Failed", e);
+                }
+            }
+
+            if (success) {
                 return {
                     id: songId,
                     songId: songInfo.id,
                     source: Source.QM,
                     title: songInfo.title,
                     artist: songInfo.artist,
-                    content: atob(rawLrc), // Standard LRC is base64
-                    type: LyricsType.LINEBYLINE
+                    content: content,
+                    type: type
                 }
             }
         }
