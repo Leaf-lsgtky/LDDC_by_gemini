@@ -49,6 +49,7 @@ declare global {
 const KG_SALT = "LnT6xpN3khm36zse0QzvmgTZ3waWdRSA";
 
 const signKG = (params: Record<string, any>) => {
+    if (typeof CryptoJS === 'undefined') return "";
     const keys = Object.keys(params).sort();
     let str = KG_SALT;
     for (const k of keys) {
@@ -60,6 +61,8 @@ const signKG = (params: Record<string, any>) => {
 
 const searchKG = async (keyword: string): Promise<SearchResult[]> => {
     if (!CONFIG.sources[Source.KG]) return [];
+    if (typeof CryptoJS === 'undefined') return []; // Safety check
+
     try {
         const params = {
             appid: "3116",
@@ -77,10 +80,8 @@ const searchKG = async (keyword: string): Promise<SearchResult[]> => {
         };
         
         const signature = signKG(params);
-        // Construct query string manually to ensure order if needed, though URLSearchParams is usually fine
         const query = new URLSearchParams({ ...params, signature } as any).toString();
         
-        // Note: This requires CORS support (works in Capacitor app, fails in standard browser)
         const response = await fetch(`http://complexsearch.kugou.com/v2/search/song?${query}`, {
             method: 'GET',
             headers: {
@@ -109,6 +110,7 @@ const searchKG = async (keyword: string): Promise<SearchResult[]> => {
 };
 
 const getLyricsKG = async (hash: string, songInfo: any): Promise<LyricInfo | null> => {
+    if (typeof CryptoJS === 'undefined') return null;
     try {
         // 1. Search candidates
         const searchParams = {
@@ -281,11 +283,6 @@ const getLyricsQM = async (songId: string, songInfo: any): Promise<LyricInfo | n
             const rawLrc = lyricData.lyric;
             
             if (rawQrc) {
-                // QRC is Hex string in python logic, but here likely base64 or hex depending on response
-                // LDDC python logic: qrc_decrypt(encrypted_qrc, QrcType.CLOUD)
-                // The python script handles both.
-                // Usually QM API returns Hex string for QRC.
-                // Let's try to convert hex to bytes.
                 const hex = rawQrc; 
                 const bytes = new Uint8Array(hex.match(/.{1,2}/g).map((byte:string) => parseInt(byte, 16)));
                 const content = qrcDecrypt(bytes);
@@ -321,10 +318,21 @@ const getLyricsQM = async (songId: string, songInfo: any): Promise<LyricInfo | n
 // API 3: Netease (NE) - Ported from ne.py & eapi.py
 // ==========================================
 
-const NE_KEY = CryptoJS.enc.Utf8.parse("e82ckenh8dichen8");
+// LAZY LOAD KEY to prevent crash if CryptoJS is not ready
+let NE_KEY: any = null;
+
+const getNeKey = () => {
+    if (!NE_KEY && typeof CryptoJS !== 'undefined') {
+        NE_KEY = CryptoJS.enc.Utf8.parse("e82ckenh8dichen8");
+    }
+    return NE_KEY;
+};
 
 const neEncrypt = (text: string) => {
-    const encrypted = CryptoJS.AES.encrypt(text, NE_KEY, {
+    const key = getNeKey();
+    if (!key) return "";
+
+    const encrypted = CryptoJS.AES.encrypt(text, key, {
         mode: CryptoJS.mode.ECB,
         padding: CryptoJS.pad.Pkcs7
     });
@@ -332,6 +340,8 @@ const neEncrypt = (text: string) => {
 };
 
 const eapiEncrypt = (url: string, data: any) => {
+    if (typeof CryptoJS === 'undefined') return "";
+    
     const text = JSON.stringify(data);
     const message = `nobody${url}use${text}md5forencrypt`;
     const digest = CryptoJS.MD5(message).toString();
@@ -340,10 +350,13 @@ const eapiEncrypt = (url: string, data: any) => {
 };
 
 const eapiDecrypt = (cipherHex: string) => {
+    const key = getNeKey();
+    if (!key) return "";
+
     const cipherParams = CryptoJS.lib.CipherParams.create({
         ciphertext: CryptoJS.enc.Hex.parse(cipherHex)
     });
-    const decrypted = CryptoJS.AES.decrypt(cipherParams, NE_KEY, {
+    const decrypted = CryptoJS.AES.decrypt(cipherParams, key, {
         mode: CryptoJS.mode.ECB,
         padding: CryptoJS.pad.Pkcs7
     });
@@ -352,6 +365,8 @@ const eapiDecrypt = (cipherHex: string) => {
 
 const searchNE = async (keyword: string): Promise<SearchResult[]> => {
     if (!CONFIG.sources[Source.NE]) return [];
+    if (typeof CryptoJS === 'undefined') return [];
+
     try {
         const url = "/api/search/song/list/page";
         const params = {
@@ -378,20 +393,11 @@ const searchNE = async (keyword: string): Promise<SearchResult[]> => {
             body: formBody
         });
 
-        // Attempt to read blob as text then decrypt
         const text = await response.text();
-        // NE sometimes returns hex string directly for encrypted response
-        // Or raw bytes. Fetch.text() might corrupt raw bytes if not utf8.
-        // But standard fetch handles it. 
-        // The python code says `eapi_response_decrypt` expects bytes.
-        // If we are in browser, response might be hex or binary. 
-        // Let's assume hex for now based on AES lib behavior, if not, we might need arraybuffer.
-        
         let jsonStr = "";
         try {
             jsonStr = eapiDecrypt(text);
         } catch (e) {
-            // Fallback: maybe it returned plain JSON (rare) or buffer logic needed
             jsonStr = text; 
         }
         
@@ -415,6 +421,7 @@ const searchNE = async (keyword: string): Promise<SearchResult[]> => {
 }
 
 const getLyricsNE = async (songId: string, songInfo: any): Promise<LyricInfo | null> => {
+    if (typeof CryptoJS === 'undefined') return null;
     try {
         const url = "/api/song/lyric/v1";
         const params = {
@@ -577,14 +584,6 @@ export const getLyricsContent = async (songId: string, specificLyricId?: string)
     const song = getSongById(songId);
     if (!song) return null;
 
-    // Determine source. 
-    // If specificLyricId is provided, we try to guess source from stored context or just try matches.
-    // But wait, the SearchResult object (which has source and lyricId) is what we need.
-    // The UI logic stores source in song object when updated.
-    
-    // If specificLyricId is present, it usually comes from search selection.
-    // If not present, we use song.source and song._tempLyricId (if saved).
-    
     const lyricIdToUse = specificLyricId || (song as any)._tempLyricId || song.id;
     const sourceToUse = song.source;
 
