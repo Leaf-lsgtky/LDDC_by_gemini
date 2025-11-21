@@ -1,5 +1,7 @@
+
 import { SongInfo, Source, ProcessStatus, LyricsType, LyricInfo, SearchResult } from '../types';
 import { krcDecrypt, qrcDecrypt } from './decryptor';
+import { parseAndFormatKrc, decodeBase64Utf8 } from './parser';
 
 // ==========================================
 // Configuration & Persistence
@@ -161,7 +163,8 @@ const getLyricsKG = async (hash: string, songInfo: any): Promise<LyricInfo | nul
                 
                 let content = "";
                 if (dlData.fmt === 'krc') {
-                    content = krcDecrypt(bytes);
+                    const rawKrc = krcDecrypt(bytes);
+                    content = parseAndFormatKrc(rawKrc);
                 } else {
                     content = new TextDecoder('utf-8').decode(bytes);
                 }
@@ -306,7 +309,7 @@ const getLyricsQM = async (songId: string, songInfo: any): Promise<LyricInfo | n
             
             if (!success && rawLrc) {
                 try {
-                    content = atob(rawLrc); // Standard LRC is base64
+                    content = decodeBase64Utf8(rawLrc);
                     type = LyricsType.LINEBYLINE;
                     success = true;
                 } catch (e) {
