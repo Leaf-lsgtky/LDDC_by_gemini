@@ -1,3 +1,4 @@
+// services/parser.ts
 
 export const formatTime = (ms: number): string => {
     const totalSeconds = Math.floor(ms / 1000);
@@ -11,9 +12,7 @@ export const parseAndFormatKrc = (krcContent: string): string => {
     const lines = krcContent.split(/\r?\n/);
     let result = "";
 
-    // Matches: [offset, duration]content
     const lineRegex = /^\[(\d+),(\d+)\](.*)$/;
-    // Matches: <start,duration,0>text
     const wordRegex = /<(\d+),(\d+),\d+>([^<]*)/g;
 
     for (const line of lines) {
@@ -23,7 +22,6 @@ export const parseAndFormatKrc = (krcContent: string): string => {
         const lineStart = parseInt(lineMatch[1]);
         const content = lineMatch[3];
 
-        // Start with line timestamp
         let builtLine = `${formatTime(lineStart)}`;
         
         let match;
@@ -36,7 +34,6 @@ export const parseAndFormatKrc = (krcContent: string): string => {
             const text = match[3];
             const wordStartAbs = lineStart + wordStartRel;
             
-            // Format: [Time]Word
             builtLine += `${formatTime(wordStartAbs)}${text}`;
         }
         

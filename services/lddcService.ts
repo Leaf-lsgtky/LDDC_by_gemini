@@ -1,3 +1,5 @@
+// services/lddcService.ts
+
 import { SongInfo, Source, ProcessStatus, LyricsType, LyricInfo, SearchResult } from '../types';
 import { krcDecrypt, qrcDecrypt } from './decryptor';
 import { parseAndFormatKrc, decodeBase64Utf8 } from './parser';
@@ -296,15 +298,37 @@ const getLyricsQM = async (songId: string, songInfo: any): Promise<LyricInfo | n
         let success = false;
         
         // Helper to check if string looks like lyrics
-        const isLyrics = (text: string) => text.includes('[') && text.includes(']') && (text.includes(':') || text.includes('.'));
+        const isLyrics = (text: string) => text.includes('[') && (text.includes(':') || text.includes('.'));
 
         // Helper to process byte array
         const processBytes = (bytes: Uint8Array, label: string, isLrcField: boolean) => {
             if (bytes.length < 4) return { success: false };
 
-            // A. If it's the LRC field, TRY PLAIN TEXT FIRST (UTF-8 & GBK)
+            // PRIORITY 1: Zlib Inflate (Most likely for large LRC fields in QM)
+            // This fixes the "garbled text" issue where compressed data was read as text.
+            try {
+                if (typeof pako !== 'undefined') {
+                    const inflated = pako.inflate(bytes);
+                    const res = new TextDecoder('utf-8').decode(inflated);
+                    // Check if it looks like lyrics or XML
+                    if (res.length > 10 && (isLyrics(res) || res.includes('xml') || res.includes('LyricContent'))) {
+                        console.log(`[QM] ${label} -> Zlib Inflate Success`);
+                        return { success: true, content: res, type: LyricsType.LINEBYLINE };
+                    }
+                }
+            } catch (e) {}
+
+            // PRIORITY 2: QRC Decrypt (TripleDES)
+            try {
+                const res = qrcDecrypt(bytes);
+                if (res && res.length > 10) {
+                    console.log(`[QM] ${label} -> QRC Decrypt Success`);
+                    return { success: true, content: res, type: LyricsType.VERBATIM };
+                }
+            } catch (e) {}
+
+            // PRIORITY 3: Plain Text (UTF-8 & GBK)
             if (isLrcField) {
-                // 1. UTF-8
                 try {
                     const res = new TextDecoder('utf-8').decode(bytes);
                     if (isLyrics(res)) {
@@ -313,7 +337,6 @@ const getLyricsQM = async (songId: string, songInfo: any): Promise<LyricInfo | n
                     }
                 } catch (e) {}
 
-                // 2. GBK (Common in older Chinese lyrics)
                 try {
                     const res = new TextDecoder('gbk').decode(bytes);
                     if (isLyrics(res)) {
@@ -322,28 +345,6 @@ const getLyricsQM = async (songId: string, songInfo: any): Promise<LyricInfo | n
                     }
                 } catch (e) {}
             }
-
-            // B. Try QRC Decrypt (TripleDES)
-            try {
-                const res = qrcDecrypt(bytes);
-                // Check if result looks valid
-                if (res && res.length > 10) {
-                    console.log(`[QM] ${label} -> QRC Decrypt Success`);
-                    return { success: true, content: res, type: LyricsType.VERBATIM };
-                }
-            } catch (e) {}
-
-            // C. Try Direct Inflate (Zlib)
-            try {
-                if (typeof pako !== 'undefined') {
-                    const inflated = pako.inflate(bytes);
-                    const res = new TextDecoder('utf-8').decode(inflated);
-                    if (res && res.length > 10) {
-                        console.log(`[QM] ${label} -> Zlib Inflate Success`);
-                        return { success: true, content: res, type: LyricsType.LINEBYLINE };
-                    }
-                }
-            } catch (e) {}
 
             return { success: false };
         };

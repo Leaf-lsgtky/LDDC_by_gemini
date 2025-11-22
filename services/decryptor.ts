@@ -1,3 +1,5 @@
+// services/decryptor.ts
+
 /**
  * LDDC Core Decryption Logic (Ported to TypeScript)
  * Requires: crypto-js, pako
@@ -32,6 +34,7 @@ const QMC_PRIVKEY = [
 ];
 
 export function qmc1Decrypt(data: Uint8Array): Uint8Array {
+    if (!data) return new Uint8Array(0);
     for (let i = 0; i < data.length; i++) {
         let keyIndex;
         if (i > 0x7FFF) {
@@ -52,17 +55,14 @@ const KRC_KEY = [64, 71, 97, 119, 94, 50, 116, 71, 81, 54, 49, 45, 206, 210, 110
 
 export function krcDecrypt(data: Uint8Array): string {
     try {
-        // 1. Skip first 4 bytes
-        if (!data || data.length <= 4) throw new Error("KRC Data too short");
+        if (!data || data.length <= 4) throw new Error("KRC Data too short or undefined");
         const sliced = data.slice(4);
 
-        // 2. XOR
         const xored = new Uint8Array(sliced.length);
         for (let i = 0; i < sliced.length; i++) {
             xored[i] = sliced[i] ^ KRC_KEY[i % KRC_KEY.length];
         }
 
-        // 3. Decompress (zlib)
         if (typeof pako === 'undefined') throw new Error("pako library not loaded");
         
         try {
@@ -70,7 +70,6 @@ export function krcDecrypt(data: Uint8Array): string {
             return new TextDecoder('utf-8').decode(decompressed);
         } catch (pakoErr) {
             console.error("KRC inflat error", pakoErr);
-            // If inflate fails, maybe it's not compressed? Try decode directly
             return new TextDecoder('utf-8').decode(xored);
         }
     } catch (e) {
@@ -86,21 +85,17 @@ export function krcDecrypt(data: Uint8Array): string {
 const QRC_KEY_STR = "!@#)(*$%123ZXC!@!@#)(NHL";
 
 export function qrcDecrypt(data: Uint8Array): string {
-    // Fix: Ensure data is not empty/undefined before processing
-    if (!data || data.length === 0) {
-        throw new Error("QRC Input data is empty or undefined");
+    if (!data || data.length < 8) {
+        throw new Error("QRC Input data too short (min 8 bytes)");
     }
 
     try {
         if (typeof CryptoJS === 'undefined') throw new Error("CryptoJS not loaded");
         if (typeof pako === 'undefined') throw new Error("pako library not loaded");
 
-        // console.log(`[QRC Decrypt] Input size: ${data.length} bytes`);
-
         const wordArray = CryptoJS.lib.WordArray.create(data);
         const keyHex = CryptoJS.enc.Utf8.parse(QRC_KEY_STR);
 
-        // Use NoPadding to prevent Pkcs7 errors. pako will ignore trailing garbage.
         const decrypted = CryptoJS.TripleDES.decrypt(
             { ciphertext: wordArray } as any,
             keyHex,
@@ -116,8 +111,6 @@ export function qrcDecrypt(data: Uint8Array): string {
              throw new Error("DES Decryption resulted in empty data");
         }
 
-        // 5. Decompress
-        // We wrap pako in a try-catch to provide specific logging
         try {
             const decompressed = pako.inflate(decryptedBytes);
             return new TextDecoder('utf-8').decode(decompressed);
@@ -126,15 +119,11 @@ export function qrcDecrypt(data: Uint8Array): string {
         }
 
     } catch (e) {
-        // console.warn("QRC Decrypt Error:", e);
-        
-        // Fallback: Try direct decompression (sometimes data is just zlib compressed without DES)
+        // Fallback
         try {
-            // console.log("[QRC Decrypt] Trying Direct Inflate Fallback...");
             const decompressed = pako.inflate(data);
             return new TextDecoder('utf-8').decode(decompressed);
         } catch (zlibError) {
-            // console.error("QRC Decrypt Fallback Failed", zlibError);
             throw e;
         }
     }
@@ -142,12 +131,8 @@ export function qrcDecrypt(data: Uint8Array): string {
 
 function convertWordArrayToUint8Array(wordArray: any) {
     const words = wordArray.words;
-    // With NoPadding, sigBytes might be unreliable or negative if crypto-js fails to calculate it purely.
-    // We trust the word array length which represents the full block data.
     let sigBytes = wordArray.sigBytes;
     if (sigBytes < 0) {
-        // If sigBytes is invalid, calculate from words length
-        // Each word is 4 bytes
         sigBytes = words.length * 4;
     }
 
