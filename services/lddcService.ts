@@ -545,28 +545,88 @@ const eapiEncrypt = (url: string, data: any) => {
 
 /**
  * 网易云eapi响应解密（接收原始二进制数据）
+ * Python版本: aes_decrypt(cipher_buffer, b'e82ckenh8dichen8')
  */
 const eapiDecryptBytes = (cipherBytes: Uint8Array): string => {
-    const key = getNeKey();
-    if (!key) return "";
-
-    try {
-        // 将Uint8Array转换为CryptoJS WordArray
-        const wordArray = CryptoJS.lib.WordArray.create(cipherBytes as any);
-
-        const decrypted = CryptoJS.AES.decrypt(
-            { ciphertext: wordArray } as any,
-            key,
-            {
-                mode: CryptoJS.mode.ECB,
-                padding: CryptoJS.pad.Pkcs7
-            }
-        );
-        return decrypted.toString(CryptoJS.enc.Utf8);
-    } catch (e: any) {
-        console.error("[NE] Decrypt bytes error:", e.message);
+    if (typeof CryptoJS === 'undefined') {
+        console.error("[NE] CryptoJS not loaded");
         return "";
     }
+
+    try {
+        console.log("[NE] Decrypting", cipherBytes.length, "bytes");
+
+        // 方法1: 使用CryptoJS的WordArray
+        const key = CryptoJS.enc.Utf8.parse("e82ckenh8dichen8");
+
+        // 将Uint8Array转换为WordArray
+        // CryptoJS.lib.WordArray.create期望的是普通数组
+        const words: number[] = [];
+        for (let i = 0; i < cipherBytes.length; i += 4) {
+            words.push(
+                ((cipherBytes[i] || 0) << 24) |
+                ((cipherBytes[i + 1] || 0) << 16) |
+                ((cipherBytes[i + 2] || 0) << 8) |
+                (cipherBytes[i + 3] || 0)
+            );
+        }
+        const wordArray = CryptoJS.lib.WordArray.create(words, cipherBytes.length);
+
+        console.log("[NE] Created WordArray, sigBytes:", wordArray.sigBytes);
+
+        const cipherParams = CryptoJS.lib.CipherParams.create({
+            ciphertext: wordArray
+        });
+
+        const decrypted = CryptoJS.AES.decrypt(cipherParams, key, {
+            mode: CryptoJS.mode.ECB,
+            padding: CryptoJS.pad.Pkcs7
+        });
+
+        console.log("[NE] Decrypted sigBytes:", decrypted.sigBytes);
+
+        const result = decrypted.toString(CryptoJS.enc.Utf8);
+        console.log("[NE] Result length:", result.length);
+
+        return result;
+    } catch (e: any) {
+        console.error("[NE] Decrypt bytes error:", e.message);
+
+        // 备用方法：尝试手动AES解密
+        try {
+            console.log("[NE] Trying alternative decryption...");
+            return eapiDecryptBytesAlt(cipherBytes);
+        } catch (e2: any) {
+            console.error("[NE] Alternative decryption also failed:", e2.message);
+            return "";
+        }
+    }
+};
+
+/**
+ * 备用解密方法
+ */
+const eapiDecryptBytesAlt = (cipherBytes: Uint8Array): string => {
+    const key = CryptoJS.enc.Utf8.parse("e82ckenh8dichen8");
+
+    // 转换为hex字符串再解密
+    let hexStr = "";
+    for (let i = 0; i < cipherBytes.length; i++) {
+        hexStr += cipherBytes[i].toString(16).padStart(2, '0');
+    }
+
+    console.log("[NE] Alt: hex length:", hexStr.length);
+
+    const cipherParams = CryptoJS.lib.CipherParams.create({
+        ciphertext: CryptoJS.enc.Hex.parse(hexStr)
+    });
+
+    const decrypted = CryptoJS.AES.decrypt(cipherParams, key, {
+        mode: CryptoJS.mode.ECB,
+        padding: CryptoJS.pad.Pkcs7
+    });
+
+    return decrypted.toString(CryptoJS.enc.Utf8);
 };
 
 /**
