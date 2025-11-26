@@ -268,12 +268,12 @@ const getLyricsQM = async (songId: string, songInfo: any): Promise<LyricInfo | n
         const cleanId = String(songId).replace(/^qm-/, '');
         const songIDInt = parseInt(cleanId);
 
-        console.log(`[QM] Requesting ID: ${songIDInt}`);
+        console.log(`[QM] Requesting ID: ${songIDInt}, duration: ${songInfo.duration}`);
 
         // 修复：使用正确的参数，与Python版本保持一致
         const body = {
             comm: {
-                ct: 11,  // 搜索用11，歌词API也用11
+                ct: 11,
                 cv: "1003006",
                 v: "1003006",
                 tmeAppID: "qqmusiclight",
@@ -288,9 +288,8 @@ const getLyricsQM = async (songId: string, songInfo: any): Promise<LyricInfo | n
                     songName: btoa(unescape(encodeURIComponent(songInfo.title || ""))),
                     albumName: btoa(unescape(encodeURIComponent(songInfo.album || ""))),
                     singerName: btoa(unescape(encodeURIComponent(songInfo.artist || ""))),
-                    // 修复：补全缺失的参数
                     crypt: 1,
-                    interval: songInfo.duration ? Math.floor(songInfo.duration / 1000) : 0,  // 秒
+                    interval: songInfo.duration ? Math.floor(songInfo.duration / 1000) : 200,  // 默认200秒
                     lrc_t: 0,
                     qrc: 1,
                     qrc_t: 0,
@@ -303,8 +302,13 @@ const getLyricsQM = async (songId: string, songInfo: any): Promise<LyricInfo | n
             }
         };
 
+        console.log(`[QM] Request body:`, JSON.stringify(body, null, 2));
+
         const response = await fetch("https://u.y.qq.com/cgi-bin/musicu.fcg", {
             method: "POST",
+            headers: {
+                "Content-Type": "application/json"
+            },
             body: JSON.stringify(body)
         });
 
@@ -314,19 +318,28 @@ const getLyricsQM = async (songId: string, songInfo: any): Promise<LyricInfo | n
         }
 
         const data = await response.json();
+        console.log(`[QM] Response code: ${data.code}, request.code: ${data.request?.code}`);
+
         const lyricData = data.request?.data;
 
         if (!lyricData) {
-            console.error("[QM] No lyricData");
+            console.error("[QM] No lyricData in response");
+            console.log("[QM] Full response:", JSON.stringify(data, null, 2));
             return null;
         }
 
-        const rawQrc = lyricData.qrc || lyricData.lyric;  // qrc字段或lyric字段
-        const rawLrc = lyricData.lyric;
+        // 打印所有可用字段
+        console.log(`[QM] Available fields:`, Object.keys(lyricData));
+
+        // Python版本使用的字段是 lyric, trans, roma (不是qrc)
+        const rawLyric = lyricData.lyric;  // 主歌词字段
+        const rawTrans = lyricData.trans;  // 翻译
+        const rawRoma = lyricData.roma;    // 罗马音
         const qrcType = lyricData.qrc_t;
         const lrcType = lyricData.lrc_t;
 
-        console.log(`[QM] QRC: ${rawQrc?.length || 0} bytes, qrc_t: ${qrcType}, lrc_t: ${lrcType}`);
+        console.log(`[QM] lyric: ${rawLyric?.length || 0} chars, trans: ${rawTrans?.length || 0} chars`);
+        console.log(`[QM] qrc_t: ${qrcType}, lrc_t: ${lrcType}`);
 
         let content = "";
         let type = LyricsType.LINEBYLINE;
@@ -335,96 +348,94 @@ const getLyricsQM = async (songId: string, songInfo: any): Promise<LyricInfo | n
         // Helper to check if string looks like lyrics
         const isLyrics = (text: string) => text.includes('[') && (text.includes(':') || text.includes('.'));
 
-        // Helper to process byte array
-        const processBytes = (bytes: Uint8Array, label: string, isLrcField: boolean) => {
-            if (bytes.length < 4) return { success: false };
-
-            // PRIORITY 1: QRC Decrypt (TripleDES) - 这是QQ音乐主要使用的格式
-            try {
-                const res = qrcDecrypt(bytes);
-                if (res && res.length > 10) {
-                    console.log(`[QM] ${label} -> QRC Decrypt Success`);
-                    return { success: true, content: res, type: LyricsType.VERBATIM };
-                }
-            } catch (e) {
-                console.log(`[QM] ${label} -> QRC Decrypt Failed, trying other methods`);
+        // Helper to process encrypted lyric (hex string -> decrypt)
+        const processEncryptedLyric = (hexStr: string, label: string): { success: boolean; content?: string; type?: LyricsType } => {
+            if (!hexStr || hexStr.length < 10) {
+                console.log(`[QM] ${label}: Empty or too short`);
+                return { success: false };
             }
 
-            // PRIORITY 2: Zlib Inflate
+            console.log(`[QM] ${label}: Processing ${hexStr.length} chars, first 100: ${hexStr.substring(0, 100)}`);
+
             try {
-                if (typeof pako !== 'undefined') {
-                    const inflated = pako.inflate(bytes);
-                    const res = new TextDecoder('utf-8').decode(inflated);
-                    if (res.length > 10 && (isLyrics(res) || res.includes('xml') || res.includes('LyricContent'))) {
-                        console.log(`[QM] ${label} -> Zlib Inflate Success`);
-                        return { success: true, content: res, type: LyricsType.LINEBYLINE };
-                    }
+                // 将hex字符串转换为字节数组
+                const match = hexStr.match(/.{1,2}/g);
+                if (!match) {
+                    console.log(`[QM] ${label}: Invalid hex string`);
+                    return { success: false };
                 }
-            } catch (e) {}
+                const bytes = new Uint8Array(match.map((byte: string) => parseInt(byte, 16)));
+                console.log(`[QM] ${label}: Converted to ${bytes.length} bytes`);
 
-            // PRIORITY 3: Plain Text (UTF-8 & GBK)
-            if (isLrcField) {
+                // 尝试QRC解密 (TripleDES + Zlib)
                 try {
-                    const res = new TextDecoder('utf-8').decode(bytes);
-                    if (isLyrics(res)) {
-                        console.log(`[QM] ${label} -> UTF-8 Success`);
-                        return { success: true, content: res, type: LyricsType.LINEBYLINE };
+                    const decrypted = qrcDecrypt(bytes);
+                    if (decrypted && decrypted.length > 10) {
+                        console.log(`[QM] ${label}: QRC Decrypt Success, length: ${decrypted.length}`);
+                        return { success: true, content: decrypted, type: LyricsType.VERBATIM };
                     }
-                } catch (e) {}
+                } catch (e: any) {
+                    console.log(`[QM] ${label}: QRC Decrypt failed: ${e.message}`);
+                }
 
+                // 尝试直接Zlib解压
                 try {
-                    const res = new TextDecoder('gbk').decode(bytes);
-                    if (isLyrics(res)) {
-                        console.log(`[QM] ${label} -> GBK Success`);
-                        return { success: true, content: res, type: LyricsType.LINEBYLINE };
+                    if (typeof pako !== 'undefined') {
+                        const inflated = pako.inflate(bytes);
+                        const text = new TextDecoder('utf-8').decode(inflated);
+                        if (text.length > 10 && isLyrics(text)) {
+                            console.log(`[QM] ${label}: Zlib inflate success`);
+                            return { success: true, content: text, type: LyricsType.LINEBYLINE };
+                        }
                     }
-                } catch (e) {}
+                } catch (e) {
+                    console.log(`[QM] ${label}: Zlib inflate failed`);
+                }
+
+            } catch (e: any) {
+                console.error(`[QM] ${label}: Error: ${e.message}`);
             }
 
             return { success: false };
         };
 
-        // 1. Process QRC Field (Hex Encoded) - 优先处理QRC
-        if (rawQrc && String(rawQrc).length > 10) {
-            try {
-                const hex = String(rawQrc);
-                const match = hex.match(/.{1,2}/g);
-                if (match) {
-                    const bytes = new Uint8Array(match.map((byte:string) => parseInt(byte, 16)));
-                    const res = processBytes(bytes, "QRC_Field", false);
-                    if (res.success) {
-                        content = res.content!;
-                        type = res.type!;
-                        success = true;
-                    }
-                }
-            } catch (e) {
-                console.warn("[QM] QRC Hex Error", e);
-            }
-        }
-
-        // 2. Process Lyric Field (Base64 Encoded) - Fallback
-        if (!success && rawLrc && String(rawLrc).length > 10) {
-            console.log("[QM] Trying LRC Field Fallback");
-            try {
-                const binaryString = atob(rawLrc);
-                const bytes = new Uint8Array(binaryString.length);
-                for (let i = 0; i < binaryString.length; i++) {
-                    bytes[i] = binaryString.charCodeAt(i);
-                }
-
-                const res = processBytes(bytes, "LRC_Field", true);
+        // 优先处理主歌词字段 (lyric)
+        // 根据qrc_t和lrc_t判断类型：非0表示有该类型的歌词
+        if (rawLyric && rawLyric.length > 10) {
+            // 判断是否为加密歌词（qrc_t非0表示QRC格式）
+            if (qrcType && qrcType !== 0) {
+                console.log(`[QM] Processing as QRC (qrc_t=${qrcType})`);
+                const res = processEncryptedLyric(rawLyric, "lyric_qrc");
                 if (res.success) {
                     content = res.content!;
                     type = res.type!;
                     success = true;
                 }
-            } catch (e) {
-                console.warn("[QM] LRC Base64 Error", e);
+            } else if (lrcType && lrcType !== 0) {
+                console.log(`[QM] Processing as LRC (lrc_t=${lrcType})`);
+                const res = processEncryptedLyric(rawLyric, "lyric_lrc");
+                if (res.success) {
+                    content = res.content!;
+                    type = LyricsType.LINEBYLINE;
+                    success = true;
+                }
+            }
+        }
+
+        // 如果主歌词处理失败，尝试直接处理字符串（可能未加密）
+        if (!success && rawLyric) {
+            console.log(`[QM] Trying direct lyric processing`);
+            // 可能是直接的文本
+            if (typeof rawLyric === 'string' && isLyrics(rawLyric)) {
+                content = rawLyric;
+                type = LyricsType.LINEBYLINE;
+                success = true;
+                console.log(`[QM] Direct string success`);
             }
         }
 
         if (success) {
+            console.log(`[QM] Success! Content length: ${content.length}`);
             return {
                 id: songId,
                 songId: songInfo.id,
@@ -436,6 +447,7 @@ const getLyricsQM = async (songId: string, songInfo: any): Promise<LyricInfo | n
             }
         } else {
             console.error("[QM] Failed to resolve lyrics.");
+            console.log("[QM] Raw lyric field:", rawLyric ? rawLyric.substring(0, 200) : "null");
         }
 
     } catch(e) {
@@ -472,20 +484,31 @@ interface NESession {
 
 let neSession: NESession | null = null;
 
-// 预设的设备ID列表（从网易云客户端提取）
+// 预设的设备ID列表（有效的UUID格式）
 const NE_DEVICE_IDS = [
     "2d8f5e3c-a1b2-4c3d-9e8f-7a6b5c4d3e2f",
-    "3e9f6d4c-b2c3-5d4e-0f9g-8b7c6d5e4f3g",
-    "4f0g7e5d-c3d4-6e5f-1g0h-9c8d7e6f5g4h",
-    "5g1h8f6e-d4e5-7f6g-2h1i-0d9e8f7g6h5i",
-    "6h2i9g7f-e5f6-8g7h-3i2j-1e0f9g8h7i6j",
-    "7i3j0h8g-f6g7-9h8i-4j3k-2f1g0h9i8j7k",
-    "8j4k1i9h-g7h8-0i9j-5k4l-3g2h1i0j9k8l",
-    "9k5l2j0i-h8i9-1j0k-6l5m-4h3i2j1k0l9m",
+    "3e9f6d4c-b2c3-5d4e-af9a-8b7c6d5e4f3a",
+    "4fab7e5d-c3d4-6e5f-1a0b-9c8d7e6f5a4b",
+    "5a1b8f6e-d4e5-7f6a-2b1c-0d9e8f7a6b5c",
+    "6b2c9a7f-e5f6-8a7b-3c2d-1e0f9a8b7c6d",
+    "7c3d0b8a-f6a7-9b8c-4d3e-2f1a0b9c8d7e",
+    "8d4e1c9b-a7b8-0c9d-5e4f-3a2b1c0d9e8f",
+    "9e5f2d0c-b8c9-1d0e-6f5a-4b3c2d1e0f9a",
 ];
 
+// 动态生成设备ID（更安全）
+const generateDeviceId = (): string => {
+    const hex = () => Math.floor(Math.random() * 16).toString(16);
+    const segment = (len: number) => Array.from({length: len}, hex).join('');
+    return `${segment(8)}-${segment(4)}-${segment(4)}-${segment(4)}-${segment(12)}`;
+};
+
 const getRandomDeviceId = (): string => {
-    return NE_DEVICE_IDS[Math.floor(Math.random() * NE_DEVICE_IDS.length)];
+    // 50%概率使用预设，50%概率动态生成
+    if (Math.random() < 0.5) {
+        return NE_DEVICE_IDS[Math.floor(Math.random() * NE_DEVICE_IDS.length)];
+    }
+    return generateDeviceId();
 };
 
 const getNeKey = () => {
@@ -521,23 +544,56 @@ const eapiEncrypt = (url: string, data: any) => {
 };
 
 /**
- * 网易云eapi响应解密
+ * 网易云eapi响应解密（接收原始二进制数据）
+ */
+const eapiDecryptBytes = (cipherBytes: Uint8Array): string => {
+    const key = getNeKey();
+    if (!key) return "";
+
+    try {
+        // 将Uint8Array转换为CryptoJS WordArray
+        const wordArray = CryptoJS.lib.WordArray.create(cipherBytes as any);
+
+        const decrypted = CryptoJS.AES.decrypt(
+            { ciphertext: wordArray } as any,
+            key,
+            {
+                mode: CryptoJS.mode.ECB,
+                padding: CryptoJS.pad.Pkcs7
+            }
+        );
+        return decrypted.toString(CryptoJS.enc.Utf8);
+    } catch (e: any) {
+        console.error("[NE] Decrypt bytes error:", e.message);
+        return "";
+    }
+};
+
+/**
+ * 网易云eapi响应解密（接收hex字符串 - 兼容旧代码）
  */
 const eapiDecrypt = (cipherHex: string) => {
     const key = getNeKey();
     if (!key) return "";
 
     try {
-        const cipherParams = CryptoJS.lib.CipherParams.create({
-            ciphertext: CryptoJS.enc.Hex.parse(cipherHex)
-        });
-        const decrypted = CryptoJS.AES.decrypt(cipherParams, key, {
-            mode: CryptoJS.mode.ECB,
-            padding: CryptoJS.pad.Pkcs7
-        });
-        return decrypted.toString(CryptoJS.enc.Utf8);
-    } catch (e) {
-        console.error("[NE] Decrypt error", e);
+        // 检查是否是hex字符串
+        if (/^[0-9a-fA-F]+$/.test(cipherHex)) {
+            const cipherParams = CryptoJS.lib.CipherParams.create({
+                ciphertext: CryptoJS.enc.Hex.parse(cipherHex)
+            });
+            const decrypted = CryptoJS.AES.decrypt(cipherParams, key, {
+                mode: CryptoJS.mode.ECB,
+                padding: CryptoJS.pad.Pkcs7
+            });
+            return decrypted.toString(CryptoJS.enc.Utf8);
+        } else {
+            // 可能是原始二进制数据转成的字符串，尝试其他方式
+            console.log("[NE] Input doesn't look like hex, trying as raw bytes");
+            return "";
+        }
+    } catch (e: any) {
+        console.error("[NE] Decrypt error:", e.message);
         return "";
     }
 };
@@ -661,51 +717,90 @@ const initNESession = async (): Promise<boolean> => {
             appver: "3.1.3.203419"
         };
 
+        console.log("[NE] Generated cookies:", JSON.stringify(preCookies, null, 2));
+
         // 准备登录参数
         const path = "/api/register/anonimous";
+        const username = getAnonymousUsername(preCookies.deviceId);
+        console.log("[NE] Generated username:", username);
+
         const params = {
-            username: getAnonymousUsername(preCookies.deviceId),
+            username: username,
             e_r: true,
             header: getParamsHeader(preCookies)
         };
 
+        console.log("[NE] Login params:", JSON.stringify(params, null, 2));
+
         const encryptedParams = eapiEncrypt(path, params);
+        console.log("[NE] Encrypted params length:", encryptedParams.length);
+
         const formBody = `params=${encryptedParams}`;
 
         // 发送登录请求
+        const headers = getNEHeaders(preCookies);
+        console.log("[NE] Request headers:", JSON.stringify(headers, null, 2));
+
         const response = await fetch("https://interface.music.163.com/eapi/register/anonimous", {
             method: "POST",
-            headers: getNEHeaders(preCookies),
+            headers: headers,
             body: formBody
         });
+
+        console.log("[NE] Response status:", response.status);
 
         if (!response.ok) {
             console.error(`[NE] Login failed: ${response.status}`);
             return false;
         }
 
-        // 解密响应
-        const responseText = await response.text();
+        // 获取响应为二进制数据
+        const responseBuffer = await response.arrayBuffer();
+        const responseBytes = new Uint8Array(responseBuffer);
+        console.log("[NE] Response bytes length:", responseBytes.length);
+
+        // 打印前20个字节用于调试
+        const firstBytes = Array.from(responseBytes.slice(0, 20)).map(b => b.toString(16).padStart(2, '0')).join(' ');
+        console.log("[NE] First 20 bytes:", firstBytes);
+
         let data: any;
+
+        // 尝试解密响应（二进制数据）
         try {
-            const decrypted = eapiDecrypt(responseText);
-            data = JSON.parse(decrypted);
-        } catch (e) {
-            // 如果解密失败，尝试直接解析
-            try {
+            const decrypted = eapiDecryptBytes(responseBytes);
+            console.log("[NE] Decrypted length:", decrypted?.length || 0);
+            if (decrypted && decrypted.length > 0) {
+                console.log("[NE] Decrypted first 500 chars:", decrypted.substring(0, 500));
+                data = JSON.parse(decrypted);
+            } else {
+                // 尝试直接作为文本解析
+                console.log("[NE] Decryption returned empty, trying as text");
+                const responseText = new TextDecoder().decode(responseBytes);
+                console.log("[NE] As text:", responseText.substring(0, 200));
                 data = JSON.parse(responseText);
-            } catch (e2) {
-                console.error("[NE] Failed to parse login response");
+            }
+        } catch (e: any) {
+            console.error("[NE] Decrypt/Parse error:", e.message);
+            // 尝试直接作为文本解析
+            try {
+                const responseText = new TextDecoder().decode(responseBytes);
+                data = JSON.parse(responseText);
+                console.log("[NE] Direct parse succeeded");
+            } catch (e2: any) {
+                console.error("[NE] Direct parse also failed:", e2.message);
                 return false;
             }
         }
 
-        if (data.code !== 200) {
-            console.error(`[NE] Login error: ${data.code}`);
-            return false;
-        }
+        console.log("[NE] Parsed data:", JSON.stringify(data, null, 2).substring(0, 1000));
 
-        console.log(`[NE] Login success, userId: ${data.userId}`);
+        if (data.code !== 200) {
+            console.error(`[NE] Login error code: ${data.code}, message: ${data.message || 'unknown'}`);
+            // 即使登录失败，也创建一个临时session尝试请求
+            console.log("[NE] Creating fallback session without login");
+        } else {
+            console.log(`[NE] Login success, userId: ${data.userId}`);
+        }
 
         // 从响应头获取cookies（在浏览器环境中可能无法获取）
         // 使用默认值
@@ -726,10 +821,11 @@ const initNESession = async (): Promise<boolean> => {
 
         // 缓存到localStorage
         localStorage.setItem('ne_session', JSON.stringify(neSession));
+        console.log("[NE] Session created and cached");
 
         return true;
-    } catch (e) {
-        console.error("[NE] Init error", e);
+    } catch (e: any) {
+        console.error("[NE] Init error:", e.message, e.stack);
         return false;
     }
 };
@@ -741,7 +837,28 @@ const ensureNESession = async (): Promise<boolean> => {
     if (neSession && neSession.expire > Date.now()) {
         return true;
     }
-    return await initNESession();
+    // 即使初始化失败也创建一个基本session
+    const result = await initNESession();
+    if (!result && !neSession) {
+        // 创建一个fallback session
+        console.log("[NE] Creating fallback session");
+        const deviceId = generateDeviceId();
+        neSession = {
+            cookies: {
+                os: "pc",
+                deviceId: deviceId,
+                osver: "Microsoft-Windows-10--build-20100-64bit",
+                clientSign: generateClientSign(),
+                channel: "netease",
+                mode: "ASUS ROG STRIX Z790",
+                appver: "3.1.3.203419",
+                WEVNSM: "1.0.0"
+            },
+            userId: "0",
+            expire: Date.now() + 3600000  // 1小时
+        };
+    }
+    return neSession !== null;
 };
 
 /**
@@ -752,12 +869,19 @@ const neRequest = async (path: string, params: Record<string, any>): Promise<any
         throw new Error("NE session not initialized");
     }
 
+    console.log(`[NE] Request to ${path}`);
+
     // 添加必要的参数
     params.e_r = true;
     params.header = getParamsHeader(neSession!.cookies);
 
-    const encryptedParams = eapiEncrypt(path.replace("/eapi", "/api"), params);
+    console.log("[NE] Request params:", JSON.stringify(params, null, 2));
+
+    const apiPath = path.replace("/eapi", "/api");
+    const encryptedParams = eapiEncrypt(apiPath, params);
     const formBody = `params=${encryptedParams}`;
+
+    console.log("[NE] Encrypted params length:", encryptedParams.length);
 
     const response = await fetch(`https://interface.music.163.com${path}`, {
         method: "POST",
@@ -765,29 +889,44 @@ const neRequest = async (path: string, params: Record<string, any>): Promise<any
         body: formBody
     });
 
+    console.log("[NE] Response status:", response.status);
+
     if (!response.ok) {
         throw new Error(`NE request failed: ${response.status}`);
     }
 
-    const responseText = await response.text();
+    // 获取响应为二进制数据
+    const responseBuffer = await response.arrayBuffer();
+    const responseBytes = new Uint8Array(responseBuffer);
+    console.log("[NE] Response bytes length:", responseBytes.length);
+
     let data: any;
 
     try {
-        const decrypted = eapiDecrypt(responseText);
-        if (decrypted) {
+        const decrypted = eapiDecryptBytes(responseBytes);
+        console.log("[NE] Decrypted length:", decrypted?.length || 0);
+        if (decrypted && decrypted.length > 0) {
             data = JSON.parse(decrypted);
         } else {
+            console.log("[NE] Decryption empty, trying as text");
+            const responseText = new TextDecoder().decode(responseBytes);
             data = JSON.parse(responseText);
         }
-    } catch (e) {
+    } catch (e: any) {
+        console.error("[NE] Decrypt/parse error:", e.message);
         try {
+            const responseText = new TextDecoder().decode(responseBytes);
             data = JSON.parse(responseText);
-        } catch (e2) {
+        } catch (e2: any) {
+            console.error("[NE] Direct parse failed:", e2.message);
             throw new Error("Failed to parse NE response");
         }
     }
 
+    console.log("[NE] Response code:", data.code);
+
     if (data.code !== 200) {
+        console.error("[NE] API error response:", JSON.stringify(data, null, 2).substring(0, 500));
         throw new Error(`NE API error: ${data.code} - ${data.message || ''}`);
     }
 
