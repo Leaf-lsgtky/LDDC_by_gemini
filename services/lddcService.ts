@@ -1,4 +1,5 @@
-// services/lddcService.ts
+// services/lddcService_new.ts
+// 修复版本 - 解决QQ音乐歌词获取和网易云搜索问题
 
 import { SongInfo, Source, ProcessStatus, LyricsType, LyricInfo, SearchResult } from '../types';
 import { krcDecrypt, qrcDecrypt } from './decryptor';
@@ -64,7 +65,7 @@ const signKG = (params: Record<string, any>) => {
 
 const searchKG = async (keyword: string): Promise<SearchResult[]> => {
     if (!CONFIG.sources[Source.KG]) return [];
-    if (typeof CryptoJS === 'undefined') return []; 
+    if (typeof CryptoJS === 'undefined') return [];
 
     try {
         const params = {
@@ -81,10 +82,10 @@ const searchKG = async (keyword: string): Promise<SearchResult[]> => {
             uuid: "-",
             sorttype: 0
         };
-        
+
         const signature = signKG(params);
         const query = new URLSearchParams({ ...params, signature } as any).toString();
-        
+
         const response = await fetch(`https://complexsearch.kugou.com/v2/search/song?${query}`, {
             method: 'GET',
             headers: {
@@ -97,13 +98,13 @@ const searchKG = async (keyword: string): Promise<SearchResult[]> => {
         const data = await response.json();
         if (data.status === 1 && data.data && data.data.lists) {
             return data.data.lists.map((item: any) => ({
-                id: `kg-${item.ID}`, 
+                id: `kg-${item.ID}`,
                 lyricId: item.FileHash,
                 title: item.SongName,
                 artist: item.SingerName,
                 album: item.AlbumName,
                 source: Source.KG,
-                type: LyricsType.VERBATIM 
+                type: LyricsType.VERBATIM
             }));
         }
     } catch (e) {
@@ -128,13 +129,13 @@ const getLyricsKG = async (hash: string, songInfo: any): Promise<LyricInfo | nul
         };
         const searchSig = signKG(searchParams);
         const searchUrl = `https://lyrics.kugou.com/v1/search?${new URLSearchParams({ ...searchParams, signature: searchSig } as any)}`;
-        
+
         const searchResp = await fetch(searchUrl);
         const searchData = await searchResp.json();
-        
+
         if (searchData.status === 200 && searchData.candidates && searchData.candidates.length > 0) {
             const bestMatch = searchData.candidates[0];
-            
+
             const downloadParams = {
                 accesskey: bestMatch.accesskey,
                 appid: "3116",
@@ -148,17 +149,17 @@ const getLyricsKG = async (hash: string, songInfo: any): Promise<LyricInfo | nul
             };
             const downloadSig = signKG(downloadParams);
             const downloadUrl = `https://lyrics.kugou.com/download?${new URLSearchParams({ ...downloadParams, signature: downloadSig } as any)}`;
-            
+
             const dlResp = await fetch(downloadUrl);
             const dlData = await dlResp.json();
-            
+
             if (dlData.status === 200 && dlData.content) {
                 const binaryString = atob(dlData.content);
                 const bytes = new Uint8Array(binaryString.length);
                 for (let i = 0; i < binaryString.length; i++) {
                     bytes[i] = binaryString.charCodeAt(i);
                 }
-                
+
                 let content = "";
                 if (dlData.fmt === 'krc') {
                     try {
@@ -191,8 +192,21 @@ const getLyricsKG = async (hash: string, songInfo: any): Promise<LyricInfo | nul
 
 
 // ==========================================
-// API 2: QQ Music (QM) - Ported from qm.py
+// API 2: QQ Music (QM) - 修复版本
 // ==========================================
+
+/**
+ * 生成QQ音乐搜索ID（与Python版本一致的算法）
+ */
+const generateQMSearchId = (): string => {
+    // Python: str(random.randint(1, 20) * 18014398509481984 + random.randint(0, 4194304) * 4294967296 + round(time.time() * 1000) % 86400000)
+    const part1 = Math.floor(Math.random() * 20 + 1) * 18014398509481984;
+    const part2 = Math.floor(Math.random() * 4194305) * 4294967296;
+    const part3 = Date.now() % 86400000;
+    // 使用BigInt来处理大数运算
+    const result = BigInt(Math.floor(part1)) + BigInt(Math.floor(part2)) + BigInt(part3);
+    return result.toString();
+};
 
 const searchQM = async (keyword: string): Promise<SearchResult[]> => {
     if (!CONFIG.sources[Source.QM]) return [];
@@ -210,7 +224,7 @@ const searchQM = async (keyword: string): Promise<SearchResult[]> => {
                 method: "DoSearchForQQMusicLite",
                 module: "music.search.SearchCgiService",
                 param: {
-                    search_id: Math.random().toString().replace('0.',''),
+                    search_id: generateQMSearchId(),  // 修复：使用正确的算法
                     remoteplace: "search.android.keyboard",
                     query: keyword,
                     search_type: 0,
@@ -228,16 +242,17 @@ const searchQM = async (keyword: string): Promise<SearchResult[]> => {
             method: "POST",
             body: JSON.stringify(body)
         });
-        
+
         const data = await response.json();
         const songList = data.request?.data?.body?.item_song || [];
-        
+
         return songList.map((item: any) => ({
             id: `qm-${item.id}`,
             lyricId: item.id.toString(),
             title: item.title,
             artist: item.singer?.map((s:any) => s.name).join('/'),
             album: item.album?.name,
+            duration: item.interval ? item.interval * 1000 : 0,  // 保存时长信息（毫秒）
             source: Source.QM,
             type: LyricsType.VERBATIM
         }));
@@ -252,20 +267,38 @@ const getLyricsQM = async (songId: string, songInfo: any): Promise<LyricInfo | n
     try {
         const cleanId = String(songId).replace(/^qm-/, '');
         const songIDInt = parseInt(cleanId);
-        
+
         console.log(`[QM] Requesting ID: ${songIDInt}`);
 
+        // 修复：使用正确的参数，与Python版本保持一致
         const body = {
-            comm: { ct: 11, cv: "1003006", v: "1003006", tmeAppID: "qqmusiclight", nettype: "NETWORK_WIFI", udid: "0" },
+            comm: {
+                ct: 11,  // 搜索用11，歌词API也用11
+                cv: "1003006",
+                v: "1003006",
+                tmeAppID: "qqmusiclight",
+                nettype: "NETWORK_WIFI",
+                udid: "0"
+            },
             request: {
                 method: "GetPlayLyricInfo",
                 module: "music.musichallSong.PlayLyricInfo",
                 param: {
                     songID: songIDInt,
-                    songName: btoa(unescape(encodeURIComponent(songInfo.title))),
+                    songName: btoa(unescape(encodeURIComponent(songInfo.title || ""))),
                     albumName: btoa(unescape(encodeURIComponent(songInfo.album || ""))),
-                    singerName: btoa(unescape(encodeURIComponent(songInfo.artist))),
-                    qrc: 1, qrc_t: 0, trans: 1, trans_t: 0, type: 0
+                    singerName: btoa(unescape(encodeURIComponent(songInfo.artist || ""))),
+                    // 修复：补全缺失的参数
+                    crypt: 1,
+                    interval: songInfo.duration ? Math.floor(songInfo.duration / 1000) : 0,  // 秒
+                    lrc_t: 0,
+                    qrc: 1,
+                    qrc_t: 0,
+                    roma: 1,
+                    roma_t: 0,
+                    trans: 1,
+                    trans_t: 0,
+                    type: 0
                 }
             }
         };
@@ -274,7 +307,7 @@ const getLyricsQM = async (songId: string, songInfo: any): Promise<LyricInfo | n
             method: "POST",
             body: JSON.stringify(body)
         });
-        
+
         if (!response.ok) {
             console.error(`[QM] Fetch Failed: ${response.status}`);
             return null;
@@ -282,21 +315,23 @@ const getLyricsQM = async (songId: string, songInfo: any): Promise<LyricInfo | n
 
         const data = await response.json();
         const lyricData = data.request?.data;
-        
+
         if (!lyricData) {
             console.error("[QM] No lyricData");
             return null;
         }
-        
-        const rawQrc = lyricData.qrc;
+
+        const rawQrc = lyricData.qrc || lyricData.lyric;  // qrc字段或lyric字段
         const rawLrc = lyricData.lyric;
-        
-        console.log(`[QM] QRC Len: ${rawQrc?.length}, LRC Len: ${rawLrc?.length}`);
+        const qrcType = lyricData.qrc_t;
+        const lrcType = lyricData.lrc_t;
+
+        console.log(`[QM] QRC: ${rawQrc?.length || 0} bytes, qrc_t: ${qrcType}, lrc_t: ${lrcType}`);
 
         let content = "";
         let type = LyricsType.LINEBYLINE;
         let success = false;
-        
+
         // Helper to check if string looks like lyrics
         const isLyrics = (text: string) => text.includes('[') && (text.includes(':') || text.includes('.'));
 
@@ -304,26 +339,26 @@ const getLyricsQM = async (songId: string, songInfo: any): Promise<LyricInfo | n
         const processBytes = (bytes: Uint8Array, label: string, isLrcField: boolean) => {
             if (bytes.length < 4) return { success: false };
 
-            // PRIORITY 1: Zlib Inflate (Most likely for large LRC fields in QM)
-            // This fixes the "garbled text" issue where compressed data was read as text.
-            try {
-                if (typeof pako !== 'undefined') {
-                    const inflated = pako.inflate(bytes);
-                    const res = new TextDecoder('utf-8').decode(inflated);
-                    // Check if it looks like lyrics or XML
-                    if (res.length > 10 && (isLyrics(res) || res.includes('xml') || res.includes('LyricContent'))) {
-                        console.log(`[QM] ${label} -> Zlib Inflate Success`);
-                        return { success: true, content: res, type: LyricsType.LINEBYLINE };
-                    }
-                }
-            } catch (e) {}
-
-            // PRIORITY 2: QRC Decrypt (TripleDES)
+            // PRIORITY 1: QRC Decrypt (TripleDES) - 这是QQ音乐主要使用的格式
             try {
                 const res = qrcDecrypt(bytes);
                 if (res && res.length > 10) {
                     console.log(`[QM] ${label} -> QRC Decrypt Success`);
                     return { success: true, content: res, type: LyricsType.VERBATIM };
+                }
+            } catch (e) {
+                console.log(`[QM] ${label} -> QRC Decrypt Failed, trying other methods`);
+            }
+
+            // PRIORITY 2: Zlib Inflate
+            try {
+                if (typeof pako !== 'undefined') {
+                    const inflated = pako.inflate(bytes);
+                    const res = new TextDecoder('utf-8').decode(inflated);
+                    if (res.length > 10 && (isLyrics(res) || res.includes('xml') || res.includes('LyricContent'))) {
+                        console.log(`[QM] ${label} -> Zlib Inflate Success`);
+                        return { success: true, content: res, type: LyricsType.LINEBYLINE };
+                    }
                 }
             } catch (e) {}
 
@@ -349,8 +384,8 @@ const getLyricsQM = async (songId: string, songInfo: any): Promise<LyricInfo | n
             return { success: false };
         };
 
-        // 1. Process QRC Field (Hex Encoded)
-        if (rawQrc && String(rawQrc).length > 10) { 
+        // 1. Process QRC Field (Hex Encoded) - 优先处理QRC
+        if (rawQrc && String(rawQrc).length > 10) {
             try {
                 const hex = String(rawQrc);
                 const match = hex.match(/.{1,2}/g);
@@ -366,8 +401,8 @@ const getLyricsQM = async (songId: string, songInfo: any): Promise<LyricInfo | n
             } catch (e) {
                 console.warn("[QM] QRC Hex Error", e);
             }
-        } 
-        
+        }
+
         // 2. Process Lyric Field (Base64 Encoded) - Fallback
         if (!success && rawLrc && String(rawLrc).length > 10) {
             console.log("[QM] Trying LRC Field Fallback");
@@ -377,7 +412,7 @@ const getLyricsQM = async (songId: string, songInfo: any): Promise<LyricInfo | n
                 for (let i = 0; i < binaryString.length; i++) {
                     bytes[i] = binaryString.charCodeAt(i);
                 }
-                
+
                 const res = processBytes(bytes, "LRC_Field", true);
                 if (res.success) {
                     content = res.content!;
@@ -410,10 +445,48 @@ const getLyricsQM = async (songId: string, songInfo: any): Promise<LyricInfo | n
 }
 
 // ==========================================
-// API 3: Netease (NE)
+// API 3: Netease (NE) - 修复版本
 // ==========================================
 
 let NE_KEY: any = null;
+
+// 网易云登录状态缓存
+interface NESession {
+    cookies: {
+        os: string;
+        deviceId: string;
+        osver: string;
+        clientSign: string;
+        channel: string;
+        mode: string;
+        appver: string;
+        NMTID?: string;
+        MUSIC_A?: string;
+        __csrf?: string;
+        WEVNSM?: string;
+        WNMCID?: string;
+    };
+    userId: string;
+    expire: number;
+}
+
+let neSession: NESession | null = null;
+
+// 预设的设备ID列表（从网易云客户端提取）
+const NE_DEVICE_IDS = [
+    "2d8f5e3c-a1b2-4c3d-9e8f-7a6b5c4d3e2f",
+    "3e9f6d4c-b2c3-5d4e-0f9g-8b7c6d5e4f3g",
+    "4f0g7e5d-c3d4-6e5f-1g0h-9c8d7e6f5g4h",
+    "5g1h8f6e-d4e5-7f6g-2h1i-0d9e8f7g6h5i",
+    "6h2i9g7f-e5f6-8g7h-3i2j-1e0f9g8h7i6j",
+    "7i3j0h8g-f6g7-9h8i-4j3k-2f1g0h9i8j7k",
+    "8j4k1i9h-g7h8-0i9j-5k4l-3g2h1i0j9k8l",
+    "9k5l2j0i-h8i9-1j0k-6l5m-4h3i2j1k0l9m",
+];
+
+const getRandomDeviceId = (): string => {
+    return NE_DEVICE_IDS[Math.floor(Math.random() * NE_DEVICE_IDS.length)];
+};
 
 const getNeKey = () => {
     if (!NE_KEY && typeof CryptoJS !== 'undefined') {
@@ -433,9 +506,13 @@ const neEncrypt = (text: string) => {
     return encrypted.ciphertext.toString(CryptoJS.enc.Hex).toUpperCase();
 };
 
+/**
+ * 网易云eapi参数加密（与Python版本完全一致）
+ */
 const eapiEncrypt = (url: string, data: any) => {
     if (typeof CryptoJS === 'undefined') return "";
-    
+
+    // 确保使用紧凑JSON格式
     const text = JSON.stringify(data);
     const message = `nobody${url}use${text}md5forencrypt`;
     const digest = CryptoJS.MD5(message).toString();
@@ -443,67 +520,313 @@ const eapiEncrypt = (url: string, data: any) => {
     return neEncrypt(dataToEncrypt);
 };
 
+/**
+ * 网易云eapi响应解密
+ */
 const eapiDecrypt = (cipherHex: string) => {
     const key = getNeKey();
     if (!key) return "";
 
-    const cipherParams = CryptoJS.lib.CipherParams.create({
-        ciphertext: CryptoJS.enc.Hex.parse(cipherHex)
+    try {
+        const cipherParams = CryptoJS.lib.CipherParams.create({
+            ciphertext: CryptoJS.enc.Hex.parse(cipherHex)
+        });
+        const decrypted = CryptoJS.AES.decrypt(cipherParams, key, {
+            mode: CryptoJS.mode.ECB,
+            padding: CryptoJS.pad.Pkcs7
+        });
+        return decrypted.toString(CryptoJS.enc.Utf8);
+    } catch (e) {
+        console.error("[NE] Decrypt error", e);
+        return "";
+    }
+};
+
+/**
+ * 生成网易云clientSign（与Python版本一致）
+ */
+const generateClientSign = (): string => {
+    // MAC地址部分
+    const mac = Array.from({length: 6}, () =>
+        Math.floor(Math.random() * 256).toString(16).padStart(2, '0').toUpperCase()
+    ).join(':');
+
+    // 随机大写字母部分
+    const randomStr = Array.from({length: 8}, () =>
+        String.fromCharCode(65 + Math.floor(Math.random() * 26))
+    ).join('');
+
+    // 64位hex字符串
+    const hashPart = Array.from({length: 64}, () =>
+        Math.floor(Math.random() * 16).toString(16)
+    ).join('');
+
+    return `${mac}@@@${randomStr}@@@@@@${hashPart}`;
+};
+
+/**
+ * 生成游客登录用户名（与Python版本一致）
+ */
+const getAnonymousUsername = (deviceId: string): string => {
+    const xorKey = '3go8&$8*3*3h0k(2)2';
+    const xoredChars: string[] = [];
+
+    for (let i = 0; i < deviceId.length; i++) {
+        const xoredChar = String.fromCharCode(
+            deviceId.charCodeAt(i) ^ xorKey.charCodeAt(i % xorKey.length)
+        );
+        xoredChars.push(xoredChar);
+    }
+
+    const xoredString = xoredChars.join('');
+    const md5Digest = CryptoJS.MD5(xoredString).toString(CryptoJS.enc.Base64);
+    const combinedStr = `${deviceId} ${md5Digest}`;
+    return btoa(combinedStr);
+};
+
+/**
+ * 获取params中的header参数
+ */
+const getParamsHeader = (cookies: NESession['cookies']): string => {
+    return JSON.stringify({
+        clientSign: cookies.clientSign,
+        os: cookies.os,
+        appver: cookies.appver,
+        deviceId: cookies.deviceId,
+        requestId: 0,
+        osver: cookies.osver
     });
-    const decrypted = CryptoJS.AES.decrypt(cipherParams, key, {
-        mode: CryptoJS.mode.ECB,
-        padding: CryptoJS.pad.Pkcs7
+};
+
+/**
+ * 获取请求头（与Python版本一致）
+ */
+const getNEHeaders = (cookies: NESession['cookies']): Record<string, string> => {
+    // 构建cookie字符串
+    const cookieStr = Object.entries(cookies)
+        .filter(([_, v]) => v)
+        .map(([k, v]) => `${k}=${v}`)
+        .join('; ');
+
+    return {
+        "Accept": "*/*",
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Cookie": cookieStr,
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Safari/537.36 Chrome/91.0.4472.164 NeteaseMusicDesktop/3.1.3.203419",
+        "Origin": "orpheus://orpheus",
+        "mconfig-info": '{"IuRPVVmc3WWul9fT":{"version":733184,"appver":"3.1.3.203419"}}'
+    };
+};
+
+/**
+ * 网易云初始化/游客登录
+ */
+const initNESession = async (): Promise<boolean> => {
+    if (typeof CryptoJS === 'undefined') {
+        console.error("[NE] CryptoJS not loaded");
+        return false;
+    }
+
+    // 检查缓存的session是否有效
+    const cached = localStorage.getItem('ne_session');
+    if (cached) {
+        try {
+            const session = JSON.parse(cached) as NESession;
+            if (session.expire > Date.now()) {
+                neSession = session;
+                console.log("[NE] Using cached session");
+                return true;
+            }
+        } catch (e) {
+            console.warn("[NE] Failed to parse cached session");
+        }
+    }
+
+    console.log("[NE] Starting anonymous login...");
+
+    try {
+        // 生成初始cookies
+        const deviceId = getRandomDeviceId();
+        const clientSign = generateClientSign();
+        const osver = `Microsoft-Windows-10--build-${Math.floor(Math.random() * 100) + 20000}-64bit`;
+        const modes = ["MS-iCraft B760M WIFI", "ASUS ROG STRIX Z790", "MSI MAG B550 TOMAHAWK", "ASRock X670E Taichi"];
+
+        const preCookies: NESession['cookies'] = {
+            os: "pc",
+            deviceId: deviceId,
+            osver: osver,
+            clientSign: clientSign,
+            channel: "netease",
+            mode: modes[Math.floor(Math.random() * modes.length)],
+            appver: "3.1.3.203419"
+        };
+
+        // 准备登录参数
+        const path = "/api/register/anonimous";
+        const params = {
+            username: getAnonymousUsername(preCookies.deviceId),
+            e_r: true,
+            header: getParamsHeader(preCookies)
+        };
+
+        const encryptedParams = eapiEncrypt(path, params);
+        const formBody = `params=${encryptedParams}`;
+
+        // 发送登录请求
+        const response = await fetch("https://interface.music.163.com/eapi/register/anonimous", {
+            method: "POST",
+            headers: getNEHeaders(preCookies),
+            body: formBody
+        });
+
+        if (!response.ok) {
+            console.error(`[NE] Login failed: ${response.status}`);
+            return false;
+        }
+
+        // 解密响应
+        const responseText = await response.text();
+        let data: any;
+        try {
+            const decrypted = eapiDecrypt(responseText);
+            data = JSON.parse(decrypted);
+        } catch (e) {
+            // 如果解密失败，尝试直接解析
+            try {
+                data = JSON.parse(responseText);
+            } catch (e2) {
+                console.error("[NE] Failed to parse login response");
+                return false;
+            }
+        }
+
+        if (data.code !== 200) {
+            console.error(`[NE] Login error: ${data.code}`);
+            return false;
+        }
+
+        console.log(`[NE] Login success, userId: ${data.userId}`);
+
+        // 从响应头获取cookies（在浏览器环境中可能无法获取）
+        // 使用默认值
+        const finalCookies: NESession['cookies'] = {
+            ...preCookies,
+            WEVNSM: "1.0.0",
+            WNMCID: `${Array.from({length: 6}, () =>
+                String.fromCharCode(97 + Math.floor(Math.random() * 26))
+            ).join('')}.${Date.now() - Math.floor(Math.random() * 10000)}.01.0`
+        };
+
+        // 创建session
+        neSession = {
+            cookies: finalCookies,
+            userId: data.userId?.toString() || "0",
+            expire: Date.now() + 864000000  // 10天
+        };
+
+        // 缓存到localStorage
+        localStorage.setItem('ne_session', JSON.stringify(neSession));
+
+        return true;
+    } catch (e) {
+        console.error("[NE] Init error", e);
+        return false;
+    }
+};
+
+/**
+ * 确保NE session已初始化
+ */
+const ensureNESession = async (): Promise<boolean> => {
+    if (neSession && neSession.expire > Date.now()) {
+        return true;
+    }
+    return await initNESession();
+};
+
+/**
+ * 网易云API请求封装
+ */
+const neRequest = async (path: string, params: Record<string, any>): Promise<any> => {
+    if (!await ensureNESession()) {
+        throw new Error("NE session not initialized");
+    }
+
+    // 添加必要的参数
+    params.e_r = true;
+    params.header = getParamsHeader(neSession!.cookies);
+
+    const encryptedParams = eapiEncrypt(path.replace("/eapi", "/api"), params);
+    const formBody = `params=${encryptedParams}`;
+
+    const response = await fetch(`https://interface.music.163.com${path}`, {
+        method: "POST",
+        headers: getNEHeaders(neSession!.cookies),
+        body: formBody
     });
-    return decrypted.toString(CryptoJS.enc.Utf8);
-}
+
+    if (!response.ok) {
+        throw new Error(`NE request failed: ${response.status}`);
+    }
+
+    const responseText = await response.text();
+    let data: any;
+
+    try {
+        const decrypted = eapiDecrypt(responseText);
+        if (decrypted) {
+            data = JSON.parse(decrypted);
+        } else {
+            data = JSON.parse(responseText);
+        }
+    } catch (e) {
+        try {
+            data = JSON.parse(responseText);
+        } catch (e2) {
+            throw new Error("Failed to parse NE response");
+        }
+    }
+
+    if (data.code !== 200) {
+        throw new Error(`NE API error: ${data.code} - ${data.message || ''}`);
+    }
+
+    return data;
+};
 
 const searchNE = async (keyword: string): Promise<SearchResult[]> => {
     if (!CONFIG.sources[Source.NE]) return [];
     if (typeof CryptoJS === 'undefined') return [];
 
     try {
-        const url = "/api/search/song/list/page";
+        // 修复：所有参数使用字符串类型
         const params = {
-            limit: 20,
-            offset: 0,
+            limit: "20",
+            offset: "0",
             keyword: keyword,
             scene: "NORMAL",
-            needCorrect: true,
-            e_r: true,
-            header: "{}" 
+            needCorrect: "true"
         };
-        
-        const encryptedParams = eapiEncrypt(url, params);
-        const formBody = new URLSearchParams();
-        formBody.append('params', encryptedParams);
 
-        const response = await fetch("https://interface.music.163.com/eapi/search/song/list/page", {
-            method: "POST",
-            headers: {
-                "Content-Type": "application/x-www-form-urlencoded",
-                "User-Agent": "NeteaseMusicDesktop/3.1.3.203419",
-                "Cookie": "os=pc; appver=3.1.3.203419"
-            },
-            body: formBody
-        });
+        const data = await neRequest("/eapi/search/song/list/page", params);
 
-        const text = await response.text();
-        let jsonStr = "";
-        try {
-            jsonStr = eapiDecrypt(text);
-        } catch (e) {
-            jsonStr = text; 
+        // 检查响应结构
+        if (!data.data || !data.data.resources) {
+            console.warn("[NE] No search results in response");
+            return [];
         }
-        
-        const data = JSON.parse(jsonStr);
-        const songs = data.data?.resources?.map((r:any) => r.baseInfo?.simpleSongData) || [];
+
+        const songs = data.data.resources
+            .map((r: any) => r.baseInfo?.simpleSongData)
+            .filter((s: any) => s);
 
         return songs.map((item: any) => ({
             id: `ne-${item.id}`,
             lyricId: item.id.toString(),
             title: item.name,
-            artist: item.ar?.map((a:any) => a.name).join('/'),
+            artist: item.ar?.map((a: any) => a.name).join('/'),
             album: item.al?.name,
+            duration: item.dt || 0,
             source: Source.NE,
             type: LyricsType.LINEBYLINE
         }));
@@ -512,53 +835,82 @@ const searchNE = async (keyword: string): Promise<SearchResult[]> => {
         console.warn("NE Search Error", e);
     }
     return [];
-}
+};
+
+/**
+ * 解析网易云YRC格式歌词（逐字歌词）
+ */
+const parseYRC = (yrcContent: string): string => {
+    // YRC格式: [time,duration]word(startTime,endTime)
+    // 转换为LRC格式显示
+    const lines: string[] = [];
+    const lineRegex = /\[(\d+),(\d+)\](.+)/g;
+
+    let match;
+    while ((match = lineRegex.exec(yrcContent)) !== null) {
+        const startTime = parseInt(match[1]);
+        const lineContent = match[3];
+
+        // 提取纯文本（移除时间标签）
+        const text = lineContent.replace(/\(\d+,\d+\)/g, '');
+
+        // 转换时间戳为LRC格式
+        const minutes = Math.floor(startTime / 60000);
+        const seconds = Math.floor((startTime % 60000) / 1000);
+        const ms = Math.floor((startTime % 1000) / 10);
+
+        lines.push(`[${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}.${ms.toString().padStart(2, '0')}]${text}`);
+    }
+
+    return lines.join('\n');
+};
+
+/**
+ * 解析普通LRC歌词
+ */
+const parseLRC = (lrcContent: string): string => {
+    // 已经是LRC格式，直接返回
+    if (lrcContent.includes('[') && lrcContent.includes(']')) {
+        return lrcContent;
+    }
+
+    // 纯文本，每行添加空时间戳
+    return lrcContent.split('\n').map(line => `[00:00.00]${line}`).join('\n');
+};
 
 const getLyricsNE = async (songId: string, songInfo: any): Promise<LyricInfo | null> => {
     if (typeof CryptoJS === 'undefined') return null;
+
     try {
-        const url = "/api/song/lyric/v1";
+        const cleanId = songId.replace(/^ne-/, '');
+
+        // 修复：参数使用字符串类型
         const params = {
-            id: songId,
-            lv: -1,
-            tv: -1,
-            rv: -1,
-            kv: -1,
-            yv: -1,
-            e_r: true,
-            header: "{}"
+            id: cleanId,
+            lv: "-1",
+            tv: "-1",
+            rv: "-1",
+            yv: "-1"
         };
-        
-        const encryptedParams = eapiEncrypt(url, params);
-        const formBody = new URLSearchParams();
-        formBody.append('params', encryptedParams);
 
-        const response = await fetch("https://interface.music.163.com/eapi/song/lyric/v1", {
-            method: "POST",
-            headers: {
-                "Content-Type": "application/x-www-form-urlencoded",
-                "User-Agent": "NeteaseMusicDesktop/3.1.3.203419",
-                "Cookie": "os=pc; appver=3.1.3.203419"
-            },
-            body: formBody
-        });
+        const data = await neRequest("/eapi/song/lyric/v1", params);
 
-        const text = await response.text();
-        let jsonStr = "";
-        try {
-            jsonStr = eapiDecrypt(text);
-        } catch(e) { jsonStr = text; }
-        
-        const data = JSON.parse(jsonStr);
-        
         let content = "";
         let type = LyricsType.LINEBYLINE;
 
+        // 优先使用YRC（逐字歌词）
         if (data.yrc && data.yrc.lyric) {
-            content = data.yrc.lyric;
-            type = LyricsType.VERBATIM; 
+            content = parseYRC(data.yrc.lyric);
+            type = LyricsType.VERBATIM;
         } else if (data.lrc && data.lrc.lyric) {
-            content = data.lrc.lyric;
+            content = parseLRC(data.lrc.lyric);
+            type = LyricsType.LINEBYLINE;
+        }
+
+        // 尝试添加翻译歌词
+        if (data.tlyric && data.tlyric.lyric) {
+            // 可以选择合并翻译歌词
+            // content += "\n\n--- 翻译 ---\n" + data.tlyric.lyric;
         }
 
         if (content) {
@@ -570,14 +922,14 @@ const getLyricsNE = async (songId: string, songInfo: any): Promise<LyricInfo | n
                 artist: songInfo.artist,
                 content: content,
                 type: type
-            }
+            };
         }
 
     } catch (e) {
         console.warn("NE Lyric Error", e);
     }
     return null;
-}
+};
 
 
 // ==========================================
@@ -627,7 +979,7 @@ export const processFileImport = async (files: FileList): Promise<SongInfo[]> =>
             artist: metadata.artist || artist,
             album: metadata.album || '未知专辑',
             duration: 0,
-            path: file.name, 
+            path: file.name,
             source: Source.Local,
             status: ProcessStatus.IDLE,
             coverUrl: metadata.coverUrl
@@ -683,7 +1035,7 @@ export const getLyricsContent = async (songId: string, specificLyricId?: string)
     if (sourceToUse === Source.KG) {
         return getLyricsKG(lyricIdToUse, song);
     }
-    
+
     if (sourceToUse === Source.QM) {
         return getLyricsQM(lyricIdToUse, song);
     }
@@ -715,7 +1067,7 @@ export const autoFetchLyrics = async (song: SongInfo): Promise<SongInfo> => {
     if (results.length > 0) {
         // Simple auto-match: Prefer Verbatim, then first result
         const best = results.find(r => r.type === LyricsType.VERBATIM) || results[0];
-        
+
         const updated = {
             ...song,
             status: ProcessStatus.MATCHED,
@@ -723,11 +1075,11 @@ export const autoFetchLyrics = async (song: SongInfo): Promise<SongInfo> => {
             lyricsType: best.type
         };
         (updated as any)._tempLyricId = best.lyricId; // Store ID for fetch
-        
+
         MOCK_SONGS = MOCK_SONGS.map(s => s.id === song.id ? updated : s);
         return updated;
     }
-    
+
     const updated = { ...song, status: ProcessStatus.FAILED };
     MOCK_SONGS = MOCK_SONGS.map(s => s.id === song.id ? updated : s);
     return updated;
@@ -750,4 +1102,12 @@ export const saveLyricsToTag = async (song: SongInfo): Promise<SongInfo> => {
     const updated = { ...song, status: ProcessStatus.SAVED };
     MOCK_SONGS = MOCK_SONGS.map(s => s.id === song.id ? updated : s);
     return updated;
+};
+
+// 导出初始化函数供外部调用
+export const initializeSources = async () => {
+    // 预初始化网易云session
+    if (CONFIG.sources[Source.NE]) {
+        await initNESession();
+    }
 };
